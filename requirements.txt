@@ -1,0 +1,13 @@
+PyQt5>=5.15.0
+openai-whisper>=20231117
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.1.0+cu118
+torchvision==0.16.0+cu118
+torchaudio==2.1.0+cu118
+deep-translator>=1.11.4
+TTS>=0.22.0
+ffmpeg-python>=0.2.0
+librosa>=0.10.1
+soundfile>=0.12.1
+demucs
+--extra-index-url https://download.pytorch.org/whl/cu118
