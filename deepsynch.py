@@ -1,9 +1,10 @@
 import sys
 import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                           QPushButton, QLabel, QFileDialog, QProgressBar)
+                           QPushButton, QLabel, QFileDialog, QProgressBar, QMessageBox)
 from PyQt5.QtCore import QThread, pyqtSignal
-import whisper
+from auth import AuthManager, LoginDialog
+import faster_whisper
 import torch
 from deep_translator import GoogleTranslator
 from TTS.api import TTS
@@ -108,11 +109,20 @@ class VideoProcessor(QThread):
         return reference_path
             
     def transcribe_audio(self, vocals_path):
-        """Распознавание речи с помощью Whisper из выделенного голоса"""
+        """Распознавание речи с помощью Faster Whisper из выделенного голоса"""
         self.status.emit("Распознавание речи...")
-        model = whisper.load_model("base")
-        result = model.transcribe(vocals_path)
-        return result["text"]
+        model_size = "base"
+        # Используем GPU если доступен
+        compute_type = "float16" if torch.cuda.is_available() else "int8"
+        model = faster_whisper.WhisperModel(model_size, device=self.device, compute_type=compute_type)
+        segments, info = model.transcribe(vocals_path, beam_size=5)
+        
+        # Собираем текст из всех сегментов
+        result_text = ""
+        for segment in segments:
+            result_text += segment.text + " "
+            
+        return result_text.strip()
         
     def translate_text(self, text):
         """Перевод текста на русский"""
@@ -171,9 +181,9 @@ class VideoProcessor(QThread):
             stream = ffmpeg.output(input_video.video, 
                                  input_audio.audio,
                                  output_video,
-                                 acodec='libvo_aacenc',
+                                 acodec='aac',
                                  vcodec='copy',
-                                 strict='-2')
+                                 strict='experimental')
             
             ffmpeg.run(stream, overwrite_output=True)
             return output_video
@@ -228,10 +238,22 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DeepSynch")
         self.setGeometry(100, 100, 400, 200)
         
+        # Инициализируем менеджер авторизации
+        self.auth_manager = AuthManager()
+        
         # Создаем центральный виджет и layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
+        
+        # Метка для отображения информации о пользователе
+        self.user_label = QLabel("Пользователь: не авторизован")
+        layout.addWidget(self.user_label)
+        
+        # Кнопка авторизации/выхода
+        self.auth_button = QPushButton("Войти")
+        self.auth_button.clicked.connect(self.toggle_auth)
+        layout.addWidget(self.auth_button)
         
         # Кнопка выбора файла
         self.select_button = QPushButton("Выбрать видео")
@@ -251,6 +273,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status_label)
         
         self.video_path = None
+        
+        # Проверяем, требуется ли авторизация для работы
+        self.check_auth()
+        
+    def check_auth(self):
+        """Проверка авторизации и обновление интерфейса"""
+        user_info = self.auth_manager.get_current_user_info()
+        if user_info:
+            self.user_label.setText(f"Пользователь: {user_info['name']}")
+            self.auth_button.setText("Выйти")
+            self.select_button.setEnabled(True)
+        else:
+            self.user_label.setText("Пользователь: не авторизован")
+            self.auth_button.setText("Войти")
+            self.select_button.setEnabled(False)
+            
+    def toggle_auth(self):
+        """Переключение между авторизацией и выходом"""
+        if self.auth_manager.current_user:
+            # Выход из системы
+            self.auth_manager.logout()
+            self.check_auth()
+        else:
+            # Авторизация
+            login_dialog = LoginDialog(self.auth_manager, self)
+            if login_dialog.exec_():
+                self.check_auth()
         
     def select_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
