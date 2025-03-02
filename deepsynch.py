@@ -6,6 +6,28 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from auth import AuthManager, LoginDialog
 import faster_whisper
 import torch
+
+# Настройка DirectML для PyTorch
+try:
+    import torch_directml
+    dml = torch_directml.device()
+    # Проверяем поддержку DirectML
+    test_tensor = torch.randn(1, 1).to(dml)
+    del test_tensor  # Очищаем тестовый тензор
+    
+    # Если тест прошел успешно, настраиваем DirectML
+    torch.cuda.is_available = lambda: True
+    torch.cuda.current_device = lambda: dml
+    torch.cuda.device = lambda device: dml
+    torch.cuda.device_count = lambda: 1
+    torch.cuda.set_device = lambda device: None
+    torch.cuda.get_device_name = lambda device: "DirectML Device"
+    print("DirectML успешно инициализирован для ускорения вычислений")
+except (ImportError, RuntimeError) as e:
+    print(f"DirectML не удалось инициализировать: {str(e)}")
+    print("Используется CPU")
+    dml = None
+
 from deep_translator import GoogleTranslator
 from TTS.api import TTS
 import ffmpeg
@@ -29,13 +51,27 @@ class VideoProcessor(QThread):
         self.video_path = video_path
         self.working_dir = "temp"
         os.makedirs(self.working_dir, exist_ok=True)
+        
         # Инициализируем Demucs
         self.separator = get_model('htdemucs')
         self.separator.eval()
-        if torch.cuda.is_available():
-            self.device = "cuda"
-        else:
+        
+        # Определяем устройство для вычислений
+        try:
+            if 'dml' in globals() and dml is not None:
+                self.device = dml
+                print("Используется DirectML для ускорения")
+            elif torch.cuda.is_available():
+                self.device = "cuda"
+                print("Используется CUDA")
+            else:
+                self.device = "cpu"
+                print("Используется CPU")
+        except Exception as e:
+            print(f"Ошибка при инициализации устройства: {str(e)}")
             self.device = "cpu"
+            print("Используется CPU из-за ошибки")
+            
         self.separator.to(self.device)
         
     def extract_audio(self):
@@ -55,40 +91,50 @@ class VideoProcessor(QThread):
         """Разделение аудио на голос и фон"""
         self.status.emit("Разделение аудио на голос и фон...")
         
-        # Загружаем аудио
-        audio_file = AudioFile(audio_path).read(streams=0, samplerate=self.separator.samplerate, channels=self.separator.audio_channels)
-        ref = audio_file.mean(0)
-        audio_file = (audio_file - ref.mean()) / ref.std()
-        
-        # Если есть GPU, перемещаем данные на него
-        if self.device == "cuda":
-            audio_file = audio_file.cuda()
-        
-        # Применяем модель
-        audio_file = audio_file.unsqueeze(0)
-        
-        with torch.no_grad():
-            sources = apply_model(self.separator, audio_file, split=True, device=self.device)
-            sources = sources * ref.std() + ref.mean()
-        
-        # Получаем отдельные дорожки
-        sources = sources.cpu().numpy()
-        vocals = sources[0, self.separator.sources.index('vocals')]
-        no_vocals = np.zeros_like(vocals)
-        
-        # Суммируем все, кроме вокала
-        for source in ['drums', 'bass', 'other']:
-            idx = self.separator.sources.index(source)
-            no_vocals += sources[0, idx]
-        
-        # Сохраняем результаты
-        vocals_path = os.path.join(self.working_dir, "vocals.wav")
-        background_path = os.path.join(self.working_dir, "background.wav")
-        
-        sf.write(vocals_path, vocals.T, self.separator.samplerate)
-        sf.write(background_path, no_vocals.T, self.separator.samplerate)
-        
-        return vocals_path, background_path
+        try:
+            # Загружаем аудио
+            audio_file = AudioFile(audio_path).read(streams=0, samplerate=self.separator.samplerate, channels=self.separator.audio_channels)
+            ref = audio_file.mean(0)
+            audio_file = (audio_file - ref.mean()) / ref.std()
+            
+            # Применяем модель
+            audio_file = audio_file.unsqueeze(0)
+            
+            # Для операций с комплексными числами временно используем CPU
+            self.separator.cpu()
+            audio_file = audio_file.cpu()
+            
+            with torch.no_grad():
+                sources = apply_model(self.separator, audio_file, split=True, device="cpu")
+                sources = sources * ref.std() + ref.mean()
+            
+            # Возвращаем модель на DirectML/GPU
+            self.separator.to(self.device)
+            
+            # Получаем отдельные дорожки
+            sources = sources.numpy()
+            vocals = sources[0, self.separator.sources.index('vocals')]
+            no_vocals = np.zeros_like(vocals)
+            
+            # Суммируем все, кроме вокала
+            for source in ['drums', 'bass', 'other']:
+                idx = self.separator.sources.index(source)
+                no_vocals += sources[0, idx]
+            
+            # Сохраняем результаты
+            vocals_path = os.path.join(self.working_dir, "vocals.wav")
+            background_path = os.path.join(self.working_dir, "background.wav")
+            
+            sf.write(vocals_path, vocals.T, self.separator.samplerate)
+            sf.write(background_path, no_vocals.T, self.separator.samplerate)
+            
+            return vocals_path, background_path
+            
+        except Exception as e:
+            logger.error(f"Ошибка при разделении аудио: {str(e)}")
+            # В случае ошибки возвращаем модель на исходное устройство
+            self.separator.to(self.device)
+            raise
 
     def get_reference_audio(self, vocals_path):
         """Получение референсного аудио из выделенного голоса"""
@@ -112,9 +158,19 @@ class VideoProcessor(QThread):
         """Распознавание речи с помощью Faster Whisper из выделенного голоса"""
         self.status.emit("Распознавание речи...")
         model_size = "base"
-        # Используем GPU если доступен
-        compute_type = "float16" if torch.cuda.is_available() else "int8"
-        model = faster_whisper.WhisperModel(model_size, device=self.device, compute_type=compute_type)
+        
+        # Настраиваем вычислительное устройство для Faster Whisper
+        # Faster Whisper поддерживает только 'cuda' или 'cpu' как строки
+        if torch.cuda.is_available() and str(self.device) == 'cuda':
+            device = "cuda"
+            compute_type = "float16"
+            print("Используется CUDA для Whisper")
+        else:
+            device = "cpu"
+            compute_type = "int8"
+            print("Используется CPU для Whisper")
+            
+        model = faster_whisper.WhisperModel(model_size, device=device, compute_type=compute_type)
         segments, info = model.transcribe(vocals_path, beam_size=5)
         
         # Собираем текст из всех сегментов
@@ -135,8 +191,14 @@ class VideoProcessor(QThread):
         self.status.emit("Генерация речи...")
         output_speech = os.path.join(self.working_dir, "generated_speech.wav")
         
-        # Инициализация TTS и перемещение на нужное устройство
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # TTS пока не полностью совместим с DirectML, используем CUDA или CPU
+        if torch.cuda.is_available() and str(self.device) == 'cuda':
+            device = "cuda"
+            print("Используется CUDA для TTS")
+        else:
+            device = "cpu"
+            print("Используется CPU для TTS")
+            
         tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
         tts.to(device)
         

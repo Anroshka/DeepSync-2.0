@@ -2,6 +2,7 @@ PyQt5==5.15.11
 PyQtWebEngine==5.15.6
 faster_whisper
 torch==2.1.0
+torch-directml==0.2.0.dev230826
 torchvision==0.16.0
 torchaudio==2.1.0
 deep-translator==1.11.4
