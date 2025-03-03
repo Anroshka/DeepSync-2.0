@@ -7,26 +7,30 @@ from auth import AuthManager, LoginDialog
 import faster_whisper
 import torch
 
-# Настройка DirectML для PyTorch
-try:
-    import torch_directml
-    dml = torch_directml.device()
-    # Проверяем поддержку DirectML
-    test_tensor = torch.randn(1, 1).to(dml)
-    del test_tensor  # Очищаем тестовый тензор
-    
-    # Если тест прошел успешно, настраиваем DirectML
-    torch.cuda.is_available = lambda: True
-    torch.cuda.current_device = lambda: dml
-    torch.cuda.device = lambda device: dml
-    torch.cuda.device_count = lambda: 1
-    torch.cuda.set_device = lambda device: None
-    torch.cuda.get_device_name = lambda device: "DirectML Device"
-    print("DirectML успешно инициализирован для ускорения вычислений")
-except (ImportError, RuntimeError) as e:
-    print(f"DirectML не удалось инициализировать: {str(e)}")
-    print("Используется CPU")
+# Диагностика CUDA
+print("CUDA доступность:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("Количество GPU:", torch.cuda.device_count())
+    print("Текущее устройство:", torch.cuda.current_device())
+    print("Имя устройства:", torch.cuda.get_device_name(0))
+
+# Приоритет CUDA над DirectML
+if torch.cuda.is_available():
+    print("Используется CUDA для ускорения")
     dml = None
+else:
+    # Пробуем DirectML только если нет CUDA
+    try:
+        import torch_directml
+        dml = torch_directml.device()
+        # Проверяем поддержку DirectML
+        test_tensor = torch.randn(1, 1).to(dml)
+        del test_tensor  # Очищаем тестовый тензор
+        print("DirectML успешно инициализирован для ускорения вычислений")
+    except (ImportError, RuntimeError) as e:
+        print(f"DirectML не удалось инициализировать: {str(e)}")
+        print("Используется CPU")
+        dml = None
 
 from deep_translator import GoogleTranslator
 from TTS.api import TTS
@@ -57,20 +61,18 @@ class VideoProcessor(QThread):
         self.separator.eval()
         
         # Определяем устройство для вычислений
-        try:
+        if torch.cuda.is_available():
+            self.device = "cuda"
+            print("Используется CUDA для вычислений")
+            # Явно переводим модель на GPU
+            self.separator.cuda()
+        else:
             if 'dml' in globals() and dml is not None:
                 self.device = dml
-                print("Используется DirectML для ускорения")
-            elif torch.cuda.is_available():
-                self.device = "cuda"
-                print("Используется CUDA")
+                print("Используется DirectML для вычислений")
             else:
                 self.device = "cpu"
-                print("Используется CPU")
-        except Exception as e:
-            print(f"Ошибка при инициализации устройства: {str(e)}")
-            self.device = "cpu"
-            print("Используется CPU из-за ошибки")
+                print("Используется CPU для вычислений")
             
         self.separator.to(self.device)
         
