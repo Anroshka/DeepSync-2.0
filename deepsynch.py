@@ -53,6 +53,7 @@ class VideoProcessor(QThread):
     progress = pyqtSignal(int)
     status = pyqtSignal(str)
     finished = pyqtSignal()
+    acceleration_changed = pyqtSignal(str)  # Новый сигнал
     
     def __init__(self, video_path):
         super().__init__()
@@ -67,15 +68,18 @@ class VideoProcessor(QThread):
         # Определяем устройство для вычислений
         if torch.cuda.is_available():
             self.device = "cuda"
+            self.acceleration_changed.emit("CUDA")
             print("Используется CUDA для вычислений")
             # Явно переводим модель на GPU
             self.separator.cuda()
         else:
             if 'dml' in globals() and dml is not None:
                 self.device = dml
+                self.acceleration_changed.emit("DirectML")
                 print("Используется DirectML для вычислений")
             else:
                 self.device = "cpu"
+                self.acceleration_changed.emit("CPU")
                 print("Используется CPU для вычислений")
             
         self.separator.to(self.device)
@@ -166,14 +170,18 @@ class VideoProcessor(QThread):
         model_size = "base"
         
         # Настраиваем вычислительное устройство для Faster Whisper
-        # Faster Whisper поддерживает только 'cuda' или 'cpu' как строки
         if torch.cuda.is_available() and str(self.device) == 'cuda':
             device = "cuda"
             compute_type = "float16"
+            self.acceleration_changed.emit("CUDA")
             print("Используется CUDA для Whisper")
         else:
             device = "cpu"
             compute_type = "int8"
+            if 'dml' in globals() and dml is not None:
+                self.acceleration_changed.emit("DirectML")
+            else:
+                self.acceleration_changed.emit("CPU")
             print("Используется CPU для Whisper")
             
         model = faster_whisper.WhisperModel(model_size, device=device, compute_type=compute_type)
@@ -410,6 +418,14 @@ class MainWindow(QMainWindow):
             }
         }
         
+        # Определяем тип ускорения
+        if torch.cuda.is_available():
+            self.acceleration_type = "CUDA"
+        elif 'dml' in globals() and dml is not None:
+            self.acceleration_type = "DirectML"
+        else:
+            self.acceleration_type = "CPU"
+        
         # Инициализируем менеджер авторизации
         self.auth_manager = AuthManager()
         
@@ -425,12 +441,29 @@ class MainWindow(QMainWindow):
         
         # Верхняя панель
         top_frame = StyledFrame()
-        top_layout = QHBoxLayout()
+        top_layout = QVBoxLayout()  # Изменено на вертикальный layout
+        
+        # Верхняя строка с информацией
+        info_layout = QHBoxLayout()
         
         # Информация о пользователе
         self.user_label = QLabel("Пользователь: не авторизован")
         self.user_label.setStyleSheet("font-size: 14px;")
-        top_layout.addWidget(self.user_label)
+        info_layout.addWidget(self.user_label)
+        
+        # Добавляем растягивающийся элемент
+        info_layout.addStretch()
+        
+        # Информация об ускорении
+        self.acceleration_label = QLabel(f"Ускорение: {self.acceleration_type}")
+        self.acceleration_label.setStyleSheet("""
+            font-size: 14px;
+            color: #2196F3;
+            font-weight: bold;
+        """)
+        info_layout.addWidget(self.acceleration_label)
+        
+        top_layout.addLayout(info_layout)
         
         # Кнопки управления
         buttons_layout = QHBoxLayout()
@@ -444,10 +477,10 @@ class MainWindow(QMainWindow):
         
         # Кнопка темы
         self.theme_button = QPushButton()
-        self.theme_button.setToolTip("Сменить тему оформления")  # Подсказка при наведении
+        self.theme_button.setToolTip("Сменить тему оформления")
         self.theme_button.setFixedSize(120, 35)
         self.theme_button.clicked.connect(self.toggle_theme)
-        self.update_theme_button()  # Перемещаем вызов сюда, после создания кнопки
+        self.update_theme_button()
         buttons_layout.addWidget(self.theme_button)
         
         # Выравнивание кнопок по правому краю
@@ -603,6 +636,13 @@ class MainWindow(QMainWindow):
             font-weight: bold;
         """)
         
+        # Стиль для метки ускорения
+        self.acceleration_label.setStyleSheet(f"""
+            color: {colors['primary']};
+            font-size: 14px;
+            font-weight: bold;
+        """)
+        
     def show_with_animation(self):
         """Анимированное появление окна"""
         self.opacity_effect = QGraphicsOpacityEffect()
@@ -661,6 +701,7 @@ class MainWindow(QMainWindow):
         self.processor.progress.connect(self.progress_bar.setValue)
         self.processor.status.connect(self.status_label.setText)
         self.processor.finished.connect(self.processing_finished)
+        self.processor.acceleration_changed.connect(self.update_acceleration_label)
         self.processing = True
         self.start_time = QTime.currentTime().msecsSinceStartOfDay()
         self.timer.start(1000)
@@ -711,6 +752,11 @@ class MainWindow(QMainWindow):
             self.video_path = file_path
             self.file_label.setText(os.path.basename(file_path))
             self.start_processing()
+
+    def update_acceleration_label(self, acceleration_type):
+        """Обновление метки с информацией об ускорении"""
+        self.acceleration_type = acceleration_type
+        self.acceleration_label.setText(f"Ускорение: {acceleration_type}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
