@@ -51,6 +51,7 @@ python deepsynch.py
 
 - Python 3.8+
 - NVIDIA GPU с CUDA для максимальной производительности (опционально)
+- DirectML для ускорения на GPU (Intel, AMD и других производителей) (опционально)
 - 8GB RAM минимум
 - FFmpeg
 

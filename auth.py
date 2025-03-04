@@ -3,7 +3,7 @@ import json
 import hashlib
 import requests
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-                            QLineEdit, QPushButton, QMessageBox, QTabWidget)
+                            QLineEdit, QPushButton, QMessageBox, QTabWidget, QWidget)
 from PyQt5.QtCore import QUrl, QSize
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWebEngineWidgets import QWebEngineView
