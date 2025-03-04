@@ -2,9 +2,10 @@ import sys
 import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QPushButton, QLabel, QFileDialog, QProgressBar, QMessageBox,
-                           QStyle, QStyleFactory, QHBoxLayout)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
-from PyQt5.QtGui import QPalette, QColor
+                           QStyle, QStyleFactory, QHBoxLayout, QFrame, QGraphicsOpacityEffect)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPropertyAnimation, QEasingCurve, QTime
+from PyQt5.QtGui import QPalette, QColor, QIcon
+from qt_material import apply_stylesheet, list_themes
 from auth import AuthManager, LoginDialog
 import faster_whisper
 import torch
@@ -300,121 +301,343 @@ class VideoProcessor(QThread):
             logger.error(f"Ошибка в процессе обработки: {str(e)}")
             self.status.emit(f"Ошибка: {str(e)}")
 
+class StyledFrame(QFrame):
+    """Стилизованная карточка для группировки элементов"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("styledFrame")
+        self.update_style(True)  # По умолчанию тёмная тема
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(15, 15, 15, 15)
+        self.layout.setSpacing(10)
+        
+    def update_style(self, is_dark):
+        if is_dark:
+            self.setStyleSheet("""
+                QFrame#styledFrame {
+                    background-color: rgba(255, 255, 255, 0.05);
+                    border-radius: 10px;
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QFrame#styledFrame {
+                    background-color: rgba(33, 150, 243, 0.05);
+                    border-radius: 10px;
+                    border: 1px solid rgba(33, 150, 243, 0.2);
+                }
+            """)
+
+class AnimatedProgressBar(QProgressBar):
+    """Прогресс-бар с анимацией"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.update_style(True)  # По умолчанию тёмная тема
+        self._animation = QPropertyAnimation(self, b"value")
+        self._animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._animation.setDuration(500)
+
+    def update_style(self, is_dark):
+        if is_dark:
+            self.setStyleSheet("""
+                QProgressBar {
+                    border: none;
+                    border-radius: 10px;
+                    text-align: center;
+                    background-color: rgba(255, 255, 255, 0.1);
+                    height: 20px;
+                    color: white;
+                }
+                QProgressBar::chunk {
+                    border-radius: 10px;
+                    background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #2196F3, stop:1 #00BCD4);
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QProgressBar {
+                    border: none;
+                    border-radius: 10px;
+                    text-align: center;
+                    background-color: rgba(33, 150, 243, 0.1);
+                    height: 20px;
+                    color: #2196F3;
+                }
+                QProgressBar::chunk {
+                    border-radius: 10px;
+                    background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #1976D2, stop:1 #2196F3);
+                }
+            """)
+            
+    def setValue(self, value):
+        self._animation.stop()
+        self._animation.setStartValue(self.value())
+        self._animation.setEndValue(value)
+        self._animation.start()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepSynch")
-        self.setGeometry(100, 100, 400, 300)
+        self.setGeometry(100, 100, 500, 600)
+        
+        # Определяем цветовые схемы
+        self.color_schemes = {
+            'dark': {
+                'primary': '#2196F3',      # Синий
+                'secondary': '#00BCD4',    # Голубой
+                'background': '#121212',   # Тёмный фон
+                'surface': '#1E1E1E',     # Поверхность
+                'text': '#FFFFFF',        # Белый текст
+                'text_secondary': 'rgba(255, 255, 255, 0.7)',  # Полупрозрачный белый
+                'button': '#2196F3',      # Синие кнопки
+                'button_hover': '#1976D2', # Тёмно-синий при наведении
+                'error': '#CF6679'        # Красный для ошибок
+            },
+            'light': {
+                'primary': '#2196F3',      # Синий
+                'secondary': '#0D47A1',    # Тёмно-синий
+                'background': '#FFFFFF',   # Белый фон
+                'surface': '#F5F5F5',     # Светло-серый
+                'text': '#000000',        # Чёрный текст
+                'text_secondary': 'rgba(0, 0, 0, 0.6)',  # Полупрозрачный чёрный
+                'button': '#2196F3',      # Синие кнопки
+                'button_hover': '#1976D2', # Тёмно-синий при наведении
+                'error': '#B00020'        # Красный для ошибок
+            }
+        }
         
         # Инициализируем менеджер авторизации
         self.auth_manager = AuthManager()
+        
+        # Инициализация темы
+        self.is_dark_theme = True
         
         # Создаем центральный виджет и layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
+        layout.setSpacing(20)
+        layout.setContentsMargins(20, 20, 20, 20)
         
-        # Верхняя панель с информацией о пользователе и темой
-        top_panel = QHBoxLayout()
+        # Верхняя панель
+        top_frame = StyledFrame()
+        top_layout = QHBoxLayout()
         
-        # Метка для отображения информации о пользователе
+        # Информация о пользователе
         self.user_label = QLabel("Пользователь: не авторизован")
-        top_panel.addWidget(self.user_label)
+        self.user_label.setStyleSheet("font-size: 14px;")
+        top_layout.addWidget(self.user_label)
         
-        # Кнопка переключения темы
-        self.theme_button = QPushButton("🌙")
-        self.theme_button.setFixedSize(30, 30)
-        self.theme_button.clicked.connect(self.toggle_theme)
-        top_panel.addWidget(self.theme_button)
+        # Кнопки управления
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(10)
         
-        layout.addLayout(top_panel)
-        
-        # Кнопка авторизации/выхода
+        # Кнопка авторизации
         self.auth_button = QPushButton("Войти")
+        self.auth_button.setIcon(QIcon.fromTheme("system-users"))
         self.auth_button.clicked.connect(self.toggle_auth)
-        layout.addWidget(self.auth_button)
+        buttons_layout.addWidget(self.auth_button)
+        
+        # Кнопка темы
+        self.theme_button = QPushButton()
+        self.theme_button.setToolTip("Сменить тему оформления")  # Подсказка при наведении
+        self.theme_button.setFixedSize(120, 35)
+        self.theme_button.clicked.connect(self.toggle_theme)
+        self.update_theme_button()  # Перемещаем вызов сюда, после создания кнопки
+        buttons_layout.addWidget(self.theme_button)
+        
+        # Выравнивание кнопок по правому краю
+        buttons_layout.addStretch()
+        
+        top_layout.addLayout(buttons_layout)
+        top_frame.layout.addLayout(top_layout)
+        layout.addWidget(top_frame)
+        
+        # Основная панель
+        main_frame = StyledFrame()
         
         # Кнопка выбора файла
         self.select_button = QPushButton("Выбрать видео")
+        self.select_button.setIcon(QIcon.fromTheme("video-x-generic"))
+        self.select_button.setStyleSheet("""
+            QPushButton {
+                padding: 10px;
+                font-size: 14px;
+            }
+        """)
         self.select_button.clicked.connect(self.select_file)
-        layout.addWidget(self.select_button)
+        main_frame.layout.addWidget(self.select_button)
         
-        # Метка для отображения выбранного файла
+        # Метка файла
         self.file_label = QLabel("Файл не выбран")
-        layout.addWidget(self.file_label)
+        self.file_label.setStyleSheet("color: rgba(255, 255, 255, 0.7);")
+        main_frame.layout.addWidget(self.file_label)
         
-        # Прогресс панель
-        progress_panel = QHBoxLayout()
+        layout.addWidget(main_frame)
+        
+        # Панель прогресса
+        progress_frame = StyledFrame()
         
         # Прогресс бар
-        self.progress_bar = QProgressBar()
-        progress_panel.addWidget(self.progress_bar)
+        self.progress_bar = AnimatedProgressBar()
+        progress_frame.layout.addWidget(self.progress_bar)
+        
+        # Время и отмена
+        status_layout = QHBoxLayout()
+        
+        # Метка времени
+        self.time_label = QLabel("Оставшееся время: --:--")
+        self.time_label.setStyleSheet("color: rgba(255, 255, 255, 0.7);")
+        status_layout.addWidget(self.time_label)
         
         # Кнопка отмены
         self.cancel_button = QPushButton("Отмена")
+        self.cancel_button.setIcon(QIcon.fromTheme("process-stop"))
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_processing)
-        progress_panel.addWidget(self.cancel_button)
+        status_layout.addWidget(self.cancel_button)
         
-        layout.addLayout(progress_panel)
-        
-        # Метка оставшегося времени
-        self.time_label = QLabel("Оставшееся время: --:--")
-        layout.addWidget(self.time_label)
+        progress_frame.layout.addLayout(status_layout)
         
         # Метка статуса
         self.status_label = QLabel("Готов к работе")
-        layout.addWidget(self.status_label)
+        self.status_label.setStyleSheet("""
+            padding: 5px;
+            color: rgba(255, 255, 255, 0.7);
+            font-style: italic;
+        """)
+        progress_frame.layout.addWidget(self.status_label)
         
+        layout.addWidget(progress_frame)
+        
+        # Инициализация
         self.video_path = None
         self.processing = False
         self.start_time = None
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_time_estimate)
         
-        # Проверяем, требуется ли авторизация для работы
+        # Проверяем авторизацию
         self.check_auth()
         
-        # Устанавливаем светлую тему по умолчанию
-        self.is_dark_theme = False
-        self.apply_theme()
-        
-    def toggle_theme(self):
-        """Переключение между темной и светлой темой"""
-        self.is_dark_theme = not self.is_dark_theme
-        self.theme_button.setText("☀️" if self.is_dark_theme else "🌙")
+        # Применяем тему Material Design
         self.apply_theme()
         
     def apply_theme(self):
         """Применение выбранной темы"""
-        if self.is_dark_theme:
-            app = QApplication.instance()
-            app.setStyle("Fusion")
-            palette = QPalette()
-            palette.setColor(QPalette.Window, QColor(53, 53, 53))
-            palette.setColor(QPalette.WindowText, Qt.white)
-            palette.setColor(QPalette.Base, QColor(35, 35, 35))
-            palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-            palette.setColor(QPalette.ToolTipBase, Qt.white)
-            palette.setColor(QPalette.ToolTipText, Qt.white)
-            palette.setColor(QPalette.Text, Qt.white)
-            palette.setColor(QPalette.Button, QColor(53, 53, 53))
-            palette.setColor(QPalette.ButtonText, Qt.white)
-            palette.setColor(QPalette.BrightText, Qt.red)
-            palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-            palette.setColor(QPalette.HighlightedText, Qt.black)
-            app.setPalette(palette)
-        else:
-            app = QApplication.instance()
-            app.setStyle("Fusion")
-            app.setPalette(app.style().standardPalette())
+        theme = 'dark_blue.xml' if self.is_dark_theme else 'light_blue.xml'
+        apply_stylesheet(self, theme=theme, invert_secondary=True)
+        
+        # Получаем текущую цветовую схему
+        colors = self.color_schemes['dark' if self.is_dark_theme else 'light']
+        
+        # Обновляем стили для кастомных элементов
+        for frame in self.findChildren(StyledFrame):
+            frame.update_style(self.is_dark_theme)
             
+        # Обновляем прогресс-бар
+        self.progress_bar.update_style(self.is_dark_theme)
+        
+        # Обновляем стили кнопок
+        button_style = f"""
+            QPushButton {{
+                background-color: {colors['button']};
+                color: {'white' if self.is_dark_theme else 'white'};
+                border: none;
+                border-radius: 5px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {colors['button_hover']};
+            }}
+            QPushButton:disabled {{
+                background-color: {'rgba(255, 255, 255, 0.12)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.12)'};
+                color: {'rgba(255, 255, 255, 0.3)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.3)'};
+            }}
+        """
+        
+        self.select_button.setStyleSheet(button_style)
+        self.auth_button.setStyleSheet(button_style)
+        self.cancel_button.setStyleSheet(button_style)
+        
+        # Специальный стиль для кнопки темы
+        theme_button_style = f"""
+            QPushButton {{
+                background-color: {'rgba(255, 255, 255, 0.1)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.1)'};
+                color: {colors['text']};
+                border: 1px solid {'rgba(255, 255, 255, 0.2)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.2)'};
+                border-radius: 5px;
+                padding: 5px 10px;
+                font-weight: bold;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                background-color: {'rgba(255, 255, 255, 0.15)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.15)'};
+            }}
+        """
+        self.theme_button.setStyleSheet(theme_button_style)
+        
+        # Обновляем стили текстовых меток
+        text_style = f"""
+            color: {colors['text_secondary']};
+            font-size: 14px;
+        """
+        
+        self.file_label.setStyleSheet(text_style)
+        self.time_label.setStyleSheet(text_style)
+        self.status_label.setStyleSheet(f"""
+            {text_style}
+            font-style: italic;
+            padding: 5px;
+        """)
+        
+        # Особый стиль для метки пользователя
+        self.user_label.setStyleSheet(f"""
+            color: {colors['text']};
+            font-size: 14px;
+            font-weight: bold;
+        """)
+        
+    def show_with_animation(self):
+        """Анимированное появление окна"""
+        self.opacity_effect = QGraphicsOpacityEffect()
+        self.setGraphicsEffect(self.opacity_effect)
+        
+        self.fade_in = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.fade_in.setStartValue(0)
+        self.fade_in.setEndValue(1)
+        self.fade_in.setDuration(500)
+        self.fade_in.setEasingCurve(QEasingCurve.OutCubic)
+        
+        self.show()
+        self.fade_in.start()
+        
+    def toggle_theme(self):
+        """Переключение между темной и светлой темой"""
+        self.is_dark_theme = not self.is_dark_theme
+        self.update_theme_button()
+        self.apply_theme()
+        
+    def update_theme_button(self):
+        """Обновление внешнего вида кнопки темы"""
+        if self.is_dark_theme:
+            self.theme_button.setText(" Светлая тема")
+            self.theme_button.setIcon(QIcon.fromTheme("weather-clear"))
+        else:
+            self.theme_button.setText(" Тёмная тема")
+            self.theme_button.setIcon(QIcon.fromTheme("weather-clear-night"))
+        
     def update_time_estimate(self):
         """Обновление оценки оставшегося времени"""
         if self.processing and hasattr(self, 'processor'):
             progress = self.progress_bar.value()
             if progress > 0:
-                elapsed = (QTimer.currentTime().msecsSinceStartOfDay() - self.start_time) / 1000
+                elapsed = (QTime.currentTime().msecsSinceStartOfDay() - self.start_time) / 1000
                 total_estimated = (elapsed * 100) / progress
                 remaining = total_estimated - elapsed
                 minutes = int(remaining // 60)
@@ -439,7 +662,7 @@ class MainWindow(QMainWindow):
         self.processor.status.connect(self.status_label.setText)
         self.processor.finished.connect(self.processing_finished)
         self.processing = True
-        self.start_time = QTimer.currentTime().msecsSinceStartOfDay()
+        self.start_time = QTime.currentTime().msecsSinceStartOfDay()
         self.timer.start(1000)
         self.cancel_button.setEnabled(True)
         self.select_button.setEnabled(False)
@@ -492,5 +715,5 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
+    window.show_with_animation()
     sys.exit(app.exec_()) 
