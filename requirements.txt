@@ -1,5 +1,5 @@
 PyQt5==5.15.11
-PyQtWebEngine==5.15.6
+PyQtWebEngine==5.15.7
 faster_whisper
 torch==2.4.1
 torch-directml==0.2.5.dev240914

@@ -1,8 +1,10 @@
 import sys
 import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                           QPushButton, QLabel, QFileDialog, QProgressBar, QMessageBox)
-from PyQt5.QtCore import QThread, pyqtSignal
+                           QPushButton, QLabel, QFileDialog, QProgressBar, QMessageBox,
+                           QStyle, QStyleFactory, QHBoxLayout)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
+from PyQt5.QtGui import QPalette, QColor
 from auth import AuthManager, LoginDialog
 import faster_whisper
 import torch
@@ -49,6 +51,7 @@ logger = logging.getLogger(__name__)
 class VideoProcessor(QThread):
     progress = pyqtSignal(int)
     status = pyqtSignal(str)
+    finished = pyqtSignal()
     
     def __init__(self, video_path):
         super().__init__()
@@ -291,6 +294,7 @@ class VideoProcessor(QThread):
             
             self.progress.emit(100)
             self.status.emit("Готово!")
+            self.finished.emit()
             
         except Exception as e:
             logger.error(f"Ошибка в процессе обработки: {str(e)}")
@@ -300,7 +304,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepSynch")
-        self.setGeometry(100, 100, 400, 200)
+        self.setGeometry(100, 100, 400, 300)
         
         # Инициализируем менеджер авторизации
         self.auth_manager = AuthManager()
@@ -310,9 +314,20 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
         
+        # Верхняя панель с информацией о пользователе и темой
+        top_panel = QHBoxLayout()
+        
         # Метка для отображения информации о пользователе
         self.user_label = QLabel("Пользователь: не авторизован")
-        layout.addWidget(self.user_label)
+        top_panel.addWidget(self.user_label)
+        
+        # Кнопка переключения темы
+        self.theme_button = QPushButton("🌙")
+        self.theme_button.setFixedSize(30, 30)
+        self.theme_button.clicked.connect(self.toggle_theme)
+        top_panel.addWidget(self.theme_button)
+        
+        layout.addLayout(top_panel)
         
         # Кнопка авторизации/выхода
         self.auth_button = QPushButton("Войти")
@@ -328,18 +343,115 @@ class MainWindow(QMainWindow):
         self.file_label = QLabel("Файл не выбран")
         layout.addWidget(self.file_label)
         
+        # Прогресс панель
+        progress_panel = QHBoxLayout()
+        
         # Прогресс бар
         self.progress_bar = QProgressBar()
-        layout.addWidget(self.progress_bar)
+        progress_panel.addWidget(self.progress_bar)
+        
+        # Кнопка отмены
+        self.cancel_button = QPushButton("Отмена")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_processing)
+        progress_panel.addWidget(self.cancel_button)
+        
+        layout.addLayout(progress_panel)
+        
+        # Метка оставшегося времени
+        self.time_label = QLabel("Оставшееся время: --:--")
+        layout.addWidget(self.time_label)
         
         # Метка статуса
         self.status_label = QLabel("Готов к работе")
         layout.addWidget(self.status_label)
         
         self.video_path = None
+        self.processing = False
+        self.start_time = None
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_time_estimate)
         
         # Проверяем, требуется ли авторизация для работы
         self.check_auth()
+        
+        # Устанавливаем светлую тему по умолчанию
+        self.is_dark_theme = False
+        self.apply_theme()
+        
+    def toggle_theme(self):
+        """Переключение между темной и светлой темой"""
+        self.is_dark_theme = not self.is_dark_theme
+        self.theme_button.setText("☀️" if self.is_dark_theme else "🌙")
+        self.apply_theme()
+        
+    def apply_theme(self):
+        """Применение выбранной темы"""
+        if self.is_dark_theme:
+            app = QApplication.instance()
+            app.setStyle("Fusion")
+            palette = QPalette()
+            palette.setColor(QPalette.Window, QColor(53, 53, 53))
+            palette.setColor(QPalette.WindowText, Qt.white)
+            palette.setColor(QPalette.Base, QColor(35, 35, 35))
+            palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+            palette.setColor(QPalette.ToolTipBase, Qt.white)
+            palette.setColor(QPalette.ToolTipText, Qt.white)
+            palette.setColor(QPalette.Text, Qt.white)
+            palette.setColor(QPalette.Button, QColor(53, 53, 53))
+            palette.setColor(QPalette.ButtonText, Qt.white)
+            palette.setColor(QPalette.BrightText, Qt.red)
+            palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+            palette.setColor(QPalette.HighlightedText, Qt.black)
+            app.setPalette(palette)
+        else:
+            app = QApplication.instance()
+            app.setStyle("Fusion")
+            app.setPalette(app.style().standardPalette())
+            
+    def update_time_estimate(self):
+        """Обновление оценки оставшегося времени"""
+        if self.processing and hasattr(self, 'processor'):
+            progress = self.progress_bar.value()
+            if progress > 0:
+                elapsed = (QTimer.currentTime().msecsSinceStartOfDay() - self.start_time) / 1000
+                total_estimated = (elapsed * 100) / progress
+                remaining = total_estimated - elapsed
+                minutes = int(remaining // 60)
+                seconds = int(remaining % 60)
+                self.time_label.setText(f"Оставшееся время: {minutes:02d}:{seconds:02d}")
+                
+    def cancel_processing(self):
+        """Отмена обработки видео"""
+        if hasattr(self, 'processor') and self.processing:
+            self.processor.terminate()
+            self.processing = False
+            self.timer.stop()
+            self.progress_bar.setValue(0)
+            self.status_label.setText("Обработка отменена")
+            self.cancel_button.setEnabled(False)
+            self.time_label.setText("Оставшееся время: --:--")
+            self.select_button.setEnabled(True)
+            
+    def start_processing(self):
+        self.processor = VideoProcessor(self.video_path)
+        self.processor.progress.connect(self.progress_bar.setValue)
+        self.processor.status.connect(self.status_label.setText)
+        self.processor.finished.connect(self.processing_finished)
+        self.processing = True
+        self.start_time = QTimer.currentTime().msecsSinceStartOfDay()
+        self.timer.start(1000)
+        self.cancel_button.setEnabled(True)
+        self.select_button.setEnabled(False)
+        self.processor.start()
+        
+    def processing_finished(self):
+        """Обработчик завершения обработки видео"""
+        self.processing = False
+        self.timer.stop()
+        self.cancel_button.setEnabled(False)
+        self.time_label.setText("Оставшееся время: --:--")
+        self.select_button.setEnabled(True)
         
     def check_auth(self):
         """Проверка авторизации и обновление интерфейса"""
@@ -376,12 +488,6 @@ class MainWindow(QMainWindow):
             self.video_path = file_path
             self.file_label.setText(os.path.basename(file_path))
             self.start_processing()
-            
-    def start_processing(self):
-        self.processor = VideoProcessor(self.video_path)
-        self.processor.progress.connect(self.progress_bar.setValue)
-        self.processor.status.connect(self.status_label.setText)
-        self.processor.start()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
