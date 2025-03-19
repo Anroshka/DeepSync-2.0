@@ -2,7 +2,8 @@ import sys
 import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QPushButton, QLabel, QFileDialog, QProgressBar, QMessageBox,
-                           QStyle, QStyleFactory, QHBoxLayout, QFrame, QGraphicsOpacityEffect)
+                           QStyle, QStyleFactory, QHBoxLayout, QFrame, QGraphicsOpacityEffect,
+                           QComboBox)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPropertyAnimation, QEasingCurve, QTime
 from PyQt5.QtGui import QPalette, QColor, QIcon
 from qt_material import apply_stylesheet, list_themes
@@ -55,11 +56,33 @@ class VideoProcessor(QThread):
     finished = pyqtSignal()
     acceleration_changed = pyqtSignal(str)  # Новый сигнал
     
-    def __init__(self, video_path):
+    def __init__(self, video_path, target_language='ru'):
         super().__init__()
         self.video_path = video_path
+        self.target_language = target_language
         self.working_dir = "temp"
         os.makedirs(self.working_dir, exist_ok=True)
+        
+        # Словарь поддерживаемых языков XTTS v2
+        self.supported_languages = {
+            'ar': 'Arabic',
+            'cs': 'Czech',
+            'de': 'German',
+            'en': 'English',
+            'es': 'Spanish',
+            'fr': 'French',
+            'hi': 'Hindi',
+            'hu': 'Hungarian',
+            'it': 'Italian',
+            'ja': 'Japanese',
+            'ko': 'Korean',
+            'nl': 'Dutch',
+            'pl': 'Polish',
+            'pt': 'Portuguese',
+            'ru': 'Russian',
+            'tr': 'Turkish',
+            'zh-cn': 'Chinese'
+        }
         
         # Инициализируем Demucs
         self.separator = get_model('htdemucs')
@@ -195,14 +218,14 @@ class VideoProcessor(QThread):
         return result_text.strip()
         
     def translate_text(self, text):
-        """Перевод текста на русский"""
-        self.status.emit("Перевод текста...")
-        translator = GoogleTranslator(source='auto', target='ru')
+        """Перевод текста на выбранный язык"""
+        self.status.emit(f"Перевод текста на {self.supported_languages[self.target_language]}...")
+        translator = GoogleTranslator(source='auto', target=self.target_language)
         return translator.translate(text)
         
     def generate_speech(self, text, reference_audio):
-        """Генерация речи на русском"""
-        self.status.emit("Генерация речи...")
+        """Генерация речи на выбранном языке"""
+        self.status.emit(f"Генерация речи на {self.supported_languages[self.target_language]}...")
         output_speech = os.path.join(self.working_dir, "generated_speech.wav")
         
         # TTS пока не полностью совместим с DirectML, используем CUDA или CPU
@@ -218,7 +241,7 @@ class VideoProcessor(QThread):
         
         tts.tts_to_file(text=text, 
                         file_path=output_speech,
-                        language="ru",
+                        language=self.target_language,
                         speaker_wav=reference_audio)
         
         return output_speech
@@ -392,6 +415,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DeepSynch")
         self.setGeometry(100, 100, 500, 600)
         
+        # Устанавливаем иконку приложения
+        app_icon = QIcon("icon.png")  # Нужно создать файл icon.png
+        self.setWindowIcon(app_icon)
+        
         # Определяем цветовые схемы
         self.color_schemes = {
             'dark': {
@@ -493,6 +520,41 @@ class MainWindow(QMainWindow):
         # Основная панель
         main_frame = StyledFrame()
         
+        # Добавляем выпадающий список языков перед кнопкой выбора файла
+        language_layout = QHBoxLayout()
+        language_label = QLabel("Язык перевода:")
+        language_label.setObjectName("language_label")  # Добавляем имя объекта для стилизации
+        self.target_language_combo = QComboBox()
+        self.target_language_combo.setObjectName("language_combo")  # Добавляем имя объекта для стилизации
+        self.target_language_combo.addItems([
+            "Русский", "English", "Deutsch", "Español", 
+            "Français", "Italiano", "हिन्दी", "日本語", 
+            "한국어", "Nederlands", "Polski", "Português",
+            "Türkçe", "العربية", "中文", "Čeština", "Magyar"
+        ])
+        self.language_codes = {
+            "Русский": "ru",
+            "English": "en",
+            "Deutsch": "de",
+            "Español": "es",
+            "Français": "fr",
+            "Italiano": "it",
+            "हिन्दी": "hi",
+            "日本語": "ja",
+            "한국어": "ko",
+            "Nederlands": "nl",
+            "Polski": "pl",
+            "Português": "pt",
+            "Türkçe": "tr",
+            "العربية": "ar",
+            "中文": "zh-cn",
+            "Čeština": "cs",
+            "Magyar": "hu"
+        }
+        language_layout.addWidget(language_label)
+        language_layout.addWidget(self.target_language_combo)
+        main_frame.layout.addLayout(language_layout)
+        
         # Кнопка выбора файла
         self.select_button = QPushButton("Выбрать видео")
         self.select_button.setIcon(QIcon.fromTheme("video-x-generic"))
@@ -574,6 +636,53 @@ class MainWindow(QMainWindow):
             
         # Обновляем прогресс-бар
         self.progress_bar.update_style(self.is_dark_theme)
+        
+        # Стиль для выпадающего списка языков
+        combo_style = f"""
+            QComboBox {{
+                background-color: {'rgba(255, 255, 255, 0.1)' if self.is_dark_theme else 'white'};
+                color: {'white' if self.is_dark_theme else 'black'};
+                border: 1px solid {'rgba(255, 255, 255, 0.2)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.2)'};
+                border-radius: 5px;
+                padding: 5px;
+                min-width: 150px;
+                font-size: 14px;
+            }}
+            QComboBox:hover {{
+                background-color: {'rgba(255, 255, 255, 0.15)' if self.is_dark_theme else 'rgba(33, 150, 243, 0.1)'};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 20px;
+                padding-right: 5px;
+            }}
+            QComboBox::down-arrow {{
+                color: {'white' if self.is_dark_theme else 'black'};
+                font: 16px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {'#2D2D2D' if self.is_dark_theme else 'white'};
+                color: {'white' if self.is_dark_theme else 'black'};
+                selection-background-color: {'#404040' if self.is_dark_theme else '#2196F3'};
+                selection-color: white;
+                border: 1px solid {'rgba(255, 255, 255, 0.1)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.1)'};
+                padding: 5px;
+            }}
+            QComboBox QAbstractItemView::item {{
+                min-height: 25px;
+            }}
+        """
+        self.target_language_combo.setStyleSheet(combo_style)
+        
+        # Стиль для метки языка
+        language_label_style = f"""
+            QLabel {{
+                color: {colors['text']};
+                font-size: 14px;
+                padding-right: 10px;
+            }}
+        """
+        self.findChild(QLabel, "language_label").setStyleSheet(language_label_style)
         
         # Обновляем стили кнопок
         button_style = f"""
@@ -697,7 +806,8 @@ class MainWindow(QMainWindow):
             self.select_button.setEnabled(True)
             
     def start_processing(self):
-        self.processor = VideoProcessor(self.video_path)
+        selected_language = self.language_codes[self.target_language_combo.currentText()]
+        self.processor = VideoProcessor(self.video_path, target_language=selected_language)
         self.processor.progress.connect(self.progress_bar.setValue)
         self.processor.status.connect(self.status_label.setText)
         self.processor.finished.connect(self.processing_finished)
@@ -707,6 +817,7 @@ class MainWindow(QMainWindow):
         self.timer.start(1000)
         self.cancel_button.setEnabled(True)
         self.select_button.setEnabled(False)
+        self.target_language_combo.setEnabled(False)  # Блокируем выбор языка во время обработки
         self.processor.start()
         
     def processing_finished(self):
@@ -716,6 +827,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(False)
         self.time_label.setText("Оставшееся время: --:--")
         self.select_button.setEnabled(True)
+        self.target_language_combo.setEnabled(True)  # Разблокируем выбор языка
         
     def check_auth(self):
         """Проверка авторизации и обновление интерфейса"""
