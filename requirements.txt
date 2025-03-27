@@ -1,19 +1,106 @@
---index-url https://download.pytorch.org/whl/cu121
+# requirements.txt (Отфильтровано из большого списка)
 
-PyQt5==5.15.11
-PyQtWebEngine==5.15.7
-qt-material==2.14
-faster_whisper
-torch==2.4.1+cu121
-torchvision==0.19.1
-torchaudio==2.4.1
-deep-translator==1.11.4
-TTS
-ffmpeg-python==0.2.0
-librosa==0.10.0
-soundfile==0.13.1
-numpy==1.22.0
-demucs==4.0.1
-transformers==4.35.2
-scikit-learn==1.6.1
-scipy==1.11.4
+# --- GUI ---
+PyQt5==5.15.11        # Основная GUI библиотека из твоего кода
+qt-material==2.14       # Стилизация GUI
+# PyQt5_sip==12.17.0      # Зависимость PyQt5, pip обычно ставит сам
+# PyQt5-Qt5==5.15.2       # Зависимость PyQt5, pip обычно ставит сам
+
+# --- Core ML / Torch ---
+# Выбираем CPU-версию для Dockerfile по умолчанию.
+# Если нужен GPU, замените эти строки на GPU-версии с сайта PyTorch
+torch==2.4.1           # Ядро ML, указана CPU-версия из твоего списка (без +cuXXX)
+torchaudio==2.4.1       # Для аудио операций в Torch
+torchvision==0.19.1      # Для работы с изображениями/видео в Torch (может требоваться Wav2Lip/face-alignment)
+# torch-directml==0.2.5.dev240914 # УДАЛЕНО: Специфично для Windows/DirectML, не нужно в Linux Docker
+
+# --- Speech Recognition ---
+faster-whisper==1.1.0  # Импортируется напрямую
+whisperx==3.3.1         # Импортируется опционально
+ctranslate2==4.4.0     # Зависимость faster-whisper
+tiktoken==0.9.0         # Вероятно, зависимость Whisper/WhisperX
+# openai-whisper==20240930 # УДАЛЕНО: Используется faster-whisper и whisperx
+
+# --- Translation ---
+deep-translator==1.11.4 # Импортируется напрямую
+
+# --- Text-to-Speech ---
+TTS==0.21.1            # Импортируется напрямую (Coqui TTS)
+coqpit==0.0.17          # Зависимость TTS
+huggingface-hub==0.29.1 # Зависимость TTS/Transformers для скачивания моделей
+# trainer==0.0.36         # Возможно, зависимость TTS
+anyascii==0.3.2         # Вероятно, зависимость TTS
+inflect==7.5.0          # Вероятно, зависимость TTS
+num2words==0.5.14       # Вероятно, зависимость TTS
+
+# --- Audio Processing ---
+ffmpeg-python==0.2.0   # Python обертка для ffmpeg
+demucs==4.0.1           # Импортируется напрямую
+librosa==0.8.1         # Импортируется напрямую (версия старовата, но оставлена из твоего списка)
+soundfile==0.13.1       # Импортируется напрямую
+numpy==1.22.0          # Основа для числовых операций (версия старовата, связана с TF?)
+scipy==1.11.4          # Для научных вычислений (resample и т.д.)
+pyrubberband==0.4.0    # Для time stretch (требует `rubberband-cli` в системе)
+pydub==0.25.1          # Возможно, используется TTS или для другой обработки аудио
+audioread==3.0.1       # Зависимость librosa
+resampy==0.4.3         # Зависимость librosa
+# soxr==0.5.0.post1      # Возможно, зависимость torchaudio/TTS
+
+# --- Wav2Lip / Face Detection Dependencies ---
+opencv-python-headless==4.11.0.86 # Для работы с видео/кадрами БЕЗ GUI (лучше для Docker)
+# opencv-python==4.8.0.76 # УДАЛЕНО: Выбрана headless версия
+face-alignment==1.4.1   # Вероятно, зависимость Wav2Lip для поиска лиц
+
+# --- Общие зависимости / Утилиты ---
+protobuf==3.19.6       # Часто требуется ML библиотеками (версия старая)
+requests==2.28.2       # Для скачивания файлов/моделей
+tqdm==4.67.1           # Прогресс-бары
+PyYAML==6.0.2          # Для чтения конфигураций (может требоваться TTS/Demucs)
+packaging==23.1        # Для работы с версиями пакетов
+filelock==3.17.0       # Для блокировки файлов (используется huggingface_hub)
+safetensors==0.5.2     # Для загрузки моделей (используется huggingface_hub/transformers)
+tokenizers==0.15.2     # Зависимость Transformers/TTS
+transformers==4.35.2   # Основная библиотека Hugging Face (может быть зависимостью TTS/WhisperX)
+onnxruntime==1.20.1    # Для запуска ONNX моделей (может требоваться whisper/demucs)
+# onnxruntime-gpu==1.16.3 # УДАЛЕНО: Используем CPU-версию onnxruntime для начала
+
+# --- Зависимости PyQt / GUI ---
+darkdetect==0.8.0      # Вероятно, используется qt-material
+
+# --- Прочее (потенциально нужное) ---
+charset-normalizer==3.4.1 # Зависимость requests/aiohttp
+idna==2.10             # Зависимость requests/aiohttp
+urllib3==1.26.20       # Зависимость requests
+certifi==2025.1.31     # SSL сертификаты
+six==1.17.0            # Совместимость Python 2/3 (нужна многим старым пакетам)
+decorator==5.1.1       # Используется многими библиотеками
+joblib==1.4.2          # Для параллелизации (может использоваться scikit-learn/librosa)
+threadpoolctl==3.5.0   # Управление потоками в C-библиотеках (NumPy, SciPy)
+attrs==25.1.0          # Используется многими библиотеками
+typing_extensions==4.13.0 # Для аннотаций типов
+pydantic==2.5.2         # Валидация данных (используется FastAPI, но может и другими)
+pydantic_core==2.14.5   # Зависимость pydantic
+annotated-types==0.7.0  # Зависимость pydantic
+yarl==1.18.3           # Зависимость aiohttp
+multidict==6.1.0       # Зависимость aiohttp
+aiohttp==3.11.12       # Асинхронные HTTP запросы (может использоваться TTS или др.)
+aiosignal==1.3.2       # Зависимость aiohttp
+frozenlist==1.5.0      # Зависимость aiohttp
+async-timeout==5.0.1   # Зависимость aiohttp
+ Pillow==10.0.0        # Работа с изображениями (нужна torchvision, face-alignment и др.)
+
+
+# ---------------------------------------------------------------
+# --- УДАЛЕННЫЕ ПАКЕТЫ (Примеры, полный список не привожу) ---
+# - tensorflow, keras (используется PyTorch)
+# - PyQt6 (используется PyQt5)
+# - Flask, fastapi, uvicorn (веб-серверы)
+# - pywin32, comtypes, pyreadline3, mss (специфично для Windows)
+# - spacy, nltk, gruut (обработка естественного языка, не явно в скрипте)
+# - gTTS (альтернативный TTS)
+# - pyannote.* (диаризация диктора)
+# - spleeter (альтернативное разделение музыки)
+# - lightgbm, xgboost (другие ML модели)
+# - Panda3D (игровой движок)
+# - И многие другие, выглядящие как зависимости зависимостей или несвязанные проекты...
+# ---------------------------------------------------------------
