@@ -33,6 +33,10 @@ class AuthManager:
             }
             self._save_users()
     
+    def is_user_logged_in(self):
+        """Проверка, авторизован ли пользователь"""
+        return self.current_user is not None
+    
     def _save_users(self):
         """Сохранение данных пользователей в файл"""
         with open(USERS_FILE, 'w') as f:

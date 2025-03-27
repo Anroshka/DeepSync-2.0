@@ -21,8 +21,53 @@ env/
 
 # Project specific
 temp/
+temp_processing/
 output_video.mp4
 *.wav
+*.mp4
+*.avi
+*.mkv
+!example_videos/*.mp4
 
-# Logs
-*.log 
+# Модели и чекпоинты
+models/
+checkpoints/
+pretrained_models/
+*.pth
+*.pt
+*.ckpt
+*.bin
+
+# Генерируемые файлы Wav2Lip
+Wav2Lip/results/
+Wav2Lip/temp/
+Wav2Lip/preprocessed/
+Wav2Lip/
+
+# Кеш TTS и Whisper моделей
+tts_models_cache/
+faster_whisper_cache/
+whisperx_cache/
+
+# Лог-файлы
+*.log
+logs/
+
+# Исключаем файлы конфигурации пользователя
+config.ini
+settings.json
+
+# Временные файлы
+*.tmp
+*.swp
+*.bak
+*~
+
+# Кеш директории
+.cache/
+cache/
+**/cache/
+
+# ОС-специфичные файлы
+.DS_Store
+Thumbs.db 
