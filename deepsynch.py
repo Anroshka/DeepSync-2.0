@@ -10,10 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPropertyAnimation, QEasingCurve, QTime
 from PyQt5.QtGui import QPalette, QColor, QIcon
 from qt_material import apply_stylesheet, list_themes
-# Предполагаем, что auth.py существует и содержит AuthManager и LoginDialog
-from auth import AuthManager, LoginDialog
-import faster_whisper
-# Добавляем импорт WhisperX
+# Импортируем только WhisperX
 try:
     import whisperx
     import torch
@@ -29,22 +26,11 @@ if torch.cuda.is_available():
     print("Текущее устройство:", torch.cuda.current_device())
     print("Имя устройства:", torch.cuda.get_device_name(0))
 
-# Приоритет CUDA над DirectML
+# Используем только CUDA или CPU
 if torch.cuda.is_available():
     print("Используется CUDA для ускорения")
-    dml = None
 else:
-    # Пробуем DirectML только если нет CUDA
-    try:
-        import torch_directml
-        dml = torch_directml.device()
-        test_tensor = torch.randn(1, 1).to(dml)
-        del test_tensor
-        print("DirectML успешно инициализирован для ускорения вычислений")
-    except (ImportError, RuntimeError) as e:
-        print(f"DirectML не удалось инициализировать: {str(e)}")
-        print("Используется CPU")
-        dml = None
+    print("Используется CPU")
 
 from deep_translator import GoogleTranslator
 from TTS.api import TTS
@@ -81,11 +67,12 @@ class VideoProcessor(QThread):
     error = pyqtSignal(str)   # Сигнал для передачи ошибок в GUI
     acceleration_changed = pyqtSignal(str)
 
-    def __init__(self, video_path, target_language='ru', use_wav2lip=False):
+    def __init__(self, video_path, target_language='ru', use_wav2lip=False, resize_factor=4):
         super().__init__()
         self.video_path = video_path
         self.target_language = target_language
         self.use_wav2lip = use_wav2lip and WAV2LIP_AVAILABLE  # Используем Wav2Lip только если он доступен
+        self.resize_factor = resize_factor  # Фактор масштабирования для Wav2Lip
         # Создаем уникальное имя папки на случай параллельной обработки
         base_working_dir = "temp_processing"
         # Можно добавить timestamp или uuid для уникальности, если нужно
@@ -137,20 +124,12 @@ class VideoProcessor(QThread):
             self.separator.cuda()
             self.acceleration_changed.emit("CUDA")
         else:
-            # DirectML проверка (остается как была)
-            if 'dml' in globals() and dml is not None:
-                self.device = dml
-                self.compute_type_whisper = "float16" # DirectML может поддерживать fp16
-                self.tts_device = "cpu" # TTS пока лучше на CPU если нет CUDA
-                logger.info("Используется DirectML для Demucs/Whisper, CPU для TTS")
-                self.acceleration_changed.emit("DirectML")
-            else:
-                self.device = "cpu"
-                self.compute_type_whisper = "int8" # int8 для CPU Whisper
-                self.tts_device = "cpu"
-                logger.info("Используется CPU для Demucs, Whisper, TTS")
-                self.acceleration_changed.emit("CPU")
-            self.separator.to(self.device) # Перемещаем Demucs на CPU/DML
+            self.device = "cpu"
+            self.compute_type_whisper = "int8" # int8 для CPU Whisper
+            self.tts_device = "cpu"
+            logger.info("Используется CPU для Demucs, Whisper, TTS")
+            self.acceleration_changed.emit("CPU")
+            self.separator.to(self.device) # Перемещаем Demucs на CPU
 
         # Инициализация TTS вынесена в run для экономии памяти, если не используется
         self.tts_model = None
@@ -213,12 +192,12 @@ class VideoProcessor(QThread):
             ref = wav.mean(0)
             wav = (wav - ref.mean()) / ref.std()
 
-            # Перемещаем тензор на нужное устройство (CUDA/CPU/DML)
+            # Перемещаем тензор на нужное устройство (CUDA/CPU)
             wav = wav.to(self.device)
 
             # Применяем модель Demucs
             with torch.no_grad():
-                # Передаем устройство явно, особенно важно для DML
+                # Передаем устройство явно
                 sources = apply_model(self.separator, wav.unsqueeze(0), device=self.device, split=True, overlap=0.25)[0]
             sources = sources * ref.std().to(self.device) + ref.mean().to(self.device)
 
@@ -382,20 +361,19 @@ class VideoProcessor(QThread):
 
     def transcribe_audio(self, vocals_path):
         self.check_cancel()
-        self.status.emit("Распознавание речи (Whisper)...")
+        self.status.emit("Распознавание речи (WhisperX)...")
         
         # Проверяем, доступен ли WhisperX
-        use_whisperx = WHISPERX_AVAILABLE
-        if use_whisperx:
+        if WHISPERX_AVAILABLE:
             logger.info(f"Запуск WhisperX (модель turbo) для {vocals_path}")
             return self._transcribe_with_whisperx(vocals_path)
         else:
-            logger.info(f"WhisperX не доступен. Запуск Faster Whisper (модель turbo) для {vocals_path}")
-            return self._transcribe_with_faster_whisper(vocals_path)
+            logger.error("WhisperX не найден. Установите whisperx для продолжения.")
+            raise ImportError("Для работы программы требуется установленный WhisperX")
             
     def _transcribe_with_whisperx(self, vocals_path):
         """
-        Транскрибирует аудио с помощью WhisperX (если доступен)
+        Транскрибирует аудио с помощью WhisperX
         """
         try:
             self.check_cancel()
@@ -425,66 +403,6 @@ class VideoProcessor(QThread):
             
         except Exception as e:
             logger.exception(f"Ошибка при транскрибировании с WhisperX: {e}")
-            logger.info(f"WhisperX не доступен. Запуск Faster Whisper (модель turbo) для {vocals_path}")
-            return self._transcribe_with_faster_whisper(vocals_path)
-            
-    def _transcribe_with_faster_whisper(self, vocals_path):
-        """
-        Транскрибирует аудио с помощью Faster Whisper
-        """
-        try:
-            self.check_cancel()
-            logger.info(f"Запуск Faster Whisper (модель turbo) для {vocals_path}")
-            
-            # Проверяем, инициализирована ли модель faster whisper
-            if self.whisper_model is None:
-                # Указываем директорию для кеша Faster Whisper, чтобы избежать повторной загрузки моделей
-                model_cache_dir = os.path.join("models", "faster_whisper")
-                os.makedirs(model_cache_dir, exist_ok=True)
-                
-                # Загружаем модель на нужное устройство
-                logger.info(f"Загрузка модели Whisper 'turbo' на устройство '{self.device}' с compute_type '{self.compute_type_whisper}'")
-                self.whisper_model = faster_whisper.WhisperModel(
-                    "turbo", 
-                    device=str(self.device), # faster-whisper ожидает строку 'cuda' или 'cpu'
-                    compute_type=self.compute_type_whisper, 
-                    download_root=model_cache_dir
-                )
-
-            # Остальной код метода
-            segments = []
-            self.status.emit("Распознавание речи (Faster Whisper)...")
-            
-            # Транскрибируем аудио
-            segments, info = self.whisper_model.transcribe(
-                vocals_path,
-                beam_size=5,
-                word_timestamps=True,
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500)
-            )
-            
-            # Преобразуем результаты в наш формат
-            result_segments = []
-            for segment in segments:
-                # Проверка на пустые сегменты
-                clean_text = segment.text.strip()
-                if not clean_text:
-                    continue
-                    
-                result_segments.append({
-                    "start": segment.start,
-                    "end": segment.end,
-                    "text": clean_text
-                })
-                logger.debug(f"Faster Whisper: [{segment.start:.2f}s -> {segment.end:.2f}s] {clean_text}")
-                self.check_cancel()
-                
-            logger.info(f"Распознано {len(result_segments)} сегментов текста с Faster Whisper")
-            return result_segments
-            
-        except Exception as e:
-            logger.exception(f"Ошибка при транскрибировании с Faster Whisper: {e}")
             raise
 
     def translate_text(self, segments):
@@ -1133,7 +1051,7 @@ class VideoProcessor(QThread):
         
         # Создаем уникальный кеш-ключ на основе имени входного видео и параметров
         video_basename = os.path.splitext(os.path.basename(video_source))[0]
-        cache_key = f"{video_basename}_lipsync_rf4"  # rf4 = resize_factor 4
+        cache_key = f"{video_basename}_lipsync_rf{self.resize_factor}"  # Включаем resize_factor в ключ кеша
         cache_dir = os.path.join("temp_processing", "wav2lip_cache")
         os.makedirs(cache_dir, exist_ok=True)
         
@@ -1170,6 +1088,7 @@ class VideoProcessor(QThread):
             "--pads", "0", "0", "0", "0",  # Отступы [top, bottom, left, right]
             "--face_det_batch_size", "16",
             "--wav2lip_batch_size", "128",
+            "--resize_factor", str(self.resize_factor),  # Используем значение из параметра класса
         ]
         
         # Wav2Lip сам определит доступность GPU через PyTorch
@@ -1640,7 +1559,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepSynch")
-        self.setGeometry(100, 100, 550, 650) # Немного больше места
+        self.setGeometry(100, 100, 600, 680) # Больше места для комфортного использования
 
         try:
             app_icon = QIcon("icon.png")
@@ -1651,62 +1570,75 @@ class MainWindow(QMainWindow):
         except Exception as e:
              logger.error(f"Ошибка загрузки иконки: {e}")
 
-        self.color_schemes = { # Обновленные цвета для лучшего контраста
+        # Обновленные цветовые схемы в стиле Windows 11
+        self.color_schemes = {
             'dark': {
-                'primary': '#448AFF',      # Ярче синий
-                'secondary': '#00BCD4',    # Голубой
-                'background': '#1E1E1E',   # Темно-серый фон
-                'surface': '#2C2C2C',     # Чуть светлее поверхность
-                'text': '#E0E0E0',        # Светло-серый текст
+                'primary': '#60CDFF',       # Акцентный синий Windows 11
+                'secondary': '#4CC2FF',     # Светло-синий
+                'background': '#202020',    # Темный фон
+                'surface': '#2C2C2C',       # Карточки/контейнеры 
+                'surface_hover': '#333333', # При наведении
+                'mica': 'rgba(44, 44, 44, 0.85)', # Эффект Mica
+                'text': '#FFFFFF',          # Белый текст
                 'text_secondary': 'rgba(255, 255, 255, 0.7)',
-                'button': '#448AFF',
-                'button_hover': '#5393FF', # Светлее при наведении
+                'button': '#60CDFF',        # Кнопки в цвет акцента
+                'button_hover': '#82D9FF',  # Светлее при наведении
+                'button_pressed': '#3CB4F2', # Темнее при нажатии
                 'disabled_bg': 'rgba(255, 255, 255, 0.1)',
-                'disabled_fg': 'rgba(255, 255, 255, 0.3)',
-                'error': '#FF5252',        # Ярче красный
+                'disabled_fg': 'rgba(255, 255, 255, 0.4)',
+                'error': '#FF7875',         # Красный для ошибок
+                'error_hover': '#FF9692',   # Светлее красный
+                'border': 'rgba(255, 255, 255, 0.15)', # Более заметная рамка
                 'progress_bg': 'rgba(255, 255, 255, 0.1)',
-                'progress_chunk': 'qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #448AFF, stop:1 #00BCD4)'
+                'progress_chunk': 'qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #60CDFF, stop:1 #4CC2FF)'
             },
             'light': {
-                'primary': '#2196F3',
-                'secondary': '#0D47A1',
-                'background': '#FAFAFA',   # Очень светлый фон
-                'surface': '#FFFFFF',     # Белая поверхность
-                'text': '#212121',        # Темно-серый текст
+                'primary': '#0067C0',       # Акцентный синий Windows 11
+                'secondary': '#0078D4',     # Светло-синий
+                'background': '#F9F9F9',    # Светло-серый фон
+                'surface': '#FFFFFF',       # Белые карточки/контейнеры
+                'surface_hover': '#F5F5F5', # При наведении
+                'mica': 'rgba(249, 249, 249, 0.85)', # Эффект Mica 
+                'text': '#202020',          # Темно-серый текст
                 'text_secondary': 'rgba(0, 0, 0, 0.6)',
-                'button': '#2196F3',
-                'button_hover': '#1976D2',
-                'disabled_bg': 'rgba(0, 0, 0, 0.1)',
-                'disabled_fg': 'rgba(0, 0, 0, 0.3)',
-                'error': '#D32F2F',        # Темнее красный
-                'progress_bg': 'rgba(33, 150, 243, 0.1)',
-                'progress_chunk': 'qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #1976D2, stop:1 #2196F3)'
+                'button': '#0067C0',        # Кнопки в цвет акцента
+                'button_hover': '#0078D4',  # Светлее при наведении
+                'button_pressed': '#005494', # Темнее при нажатии
+                'disabled_bg': 'rgba(0, 0, 0, 0.05)',
+                'disabled_fg': 'rgba(0, 0, 0, 0.4)',
+                'error': '#D13438',         # Красный для ошибок
+                'error_hover': '#E25A5E',   # Светлее красный
+                'border': 'rgba(0, 0, 0, 0.1)', # Более заметная рамка
+                'progress_bg': 'rgba(0, 103, 192, 0.1)',
+                'progress_chunk': 'qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #0078D4, stop:1 #0067C0)'
             }
         }
 
         # Определяем тип ускорения для отображения
         if torch.cuda.is_available():
             self.acceleration_type = "CUDA"
-        elif 'dml' in globals() and dml is not None:
-            self.acceleration_type = "DirectML"
         else:
             self.acceleration_type = "CPU"
 
-        self.auth_manager = AuthManager()
         self.is_dark_theme = True # По умолчанию темная
         self.processor = None
         self.current_temp_dir = None # Храним путь к временной папке
 
         self.init_ui()
-        self.check_auth()
         self.apply_theme()
 
     def init_ui(self):
+        # Устанавливаем шрифт в стиле Windows 11
+        font = self.font()
+        font.setFamily("Segoe UI")
+        font.setPointSize(10)
+        self.setFont(font)
+        
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(20)  # Больше пространства между элементами
+        main_layout.setContentsMargins(22, 22, 22, 22)  # Больше отступов
 
         # --- Верхняя панель (Инфо + Управление) ---
         top_frame = StyledFrame()
@@ -1714,26 +1646,19 @@ class MainWindow(QMainWindow):
         top_layout.setSpacing(8)
 
         info_layout = QHBoxLayout()
-        self.user_label = QLabel("Пользователь: -")
         self.acceleration_label = QLabel(f"Ускорение: {self.acceleration_type}")
         self.acceleration_label.setObjectName("accelerationLabel") # Для стилизации
-        info_layout.addWidget(self.user_label)
         info_layout.addStretch()
         info_layout.addWidget(self.acceleration_label)
         top_layout.addLayout(info_layout)
 
         buttons_layout = QHBoxLayout()
-        self.auth_button = QPushButton("Войти")
-        self.auth_button.setIcon(self.style().standardIcon(QStyle.SP_DialogYesButton)) # Используем стандартную иконку
-        self.auth_button.clicked.connect(self.toggle_auth)
-
         self.theme_button = QPushButton()
         self.theme_button.setToolTip("Сменить тему оформления")
         self.theme_button.setFixedSize(140, 32) # Чуть шире
         self.theme_button.clicked.connect(self.toggle_theme)
         self.update_theme_button() # Устанавливаем иконку и текст
 
-        buttons_layout.addWidget(self.auth_button)
         buttons_layout.addStretch()
         buttons_layout.addWidget(self.theme_button)
         top_layout.addLayout(buttons_layout)
@@ -1768,18 +1693,44 @@ class MainWindow(QMainWindow):
         main_frame_layout.addLayout(language_layout)
         
         # Добавляем опцию для Wav2Lip
-        self.wav2lip_checkbox = QCheckBox("Включить синхронизацию губ с аудио (Wav2Lip, требует 8 ГБ видеопамяти!)")
+        wav2lip_layout = QHBoxLayout()
+        
+        # Чекбокс Wav2Lip
+        self.wav2lip_checkbox = QCheckBox("Включить синхронизацию губ с аудио (Wav2Lip)")
         self.wav2lip_checkbox.setChecked(False)  # По умолчанию выключено
         self.wav2lip_checkbox.setEnabled(WAV2LIP_AVAILABLE)  # Включить только если Wav2Lip доступен
         if not WAV2LIP_AVAILABLE:
             self.wav2lip_checkbox.setToolTip("Wav2Lip недоступен. Проверьте наличие необходимых файлов.")
         else:
             self.wav2lip_checkbox.setToolTip("Включает синхронизацию движения губ с произносимым текстом. Требует GPU и значительно увеличивает время обработки.")
-        main_frame_layout.addWidget(self.wav2lip_checkbox)
+        
+        # Выпадающий список для resize_factor
+        self.resize_factor_label = QLabel("Масштаб лица:")
+        self.resize_factor_label.setObjectName("resizeFactorLabel")
+        self.resize_factor_combo = QComboBox()
+        self.resize_factor_combo.setObjectName("resizeFactorCombo")
+        self.resize_factor_combo.addItems(["1", "2", "4", "8", "16"])
+        self.resize_factor_combo.setCurrentText("4")  # По умолчанию 4
+        self.resize_factor_combo.setToolTip("Влияет на скорость обработки и качество. Меньшие значения - лучше качество, но медленнее.")
+        
+        # Включаем/отключаем контролы для resize_factor в зависимости от статуса чекбокса Wav2Lip
+        self.resize_factor_label.setEnabled(self.wav2lip_checkbox.isChecked() and WAV2LIP_AVAILABLE)
+        self.resize_factor_combo.setEnabled(self.wav2lip_checkbox.isChecked() and WAV2LIP_AVAILABLE)
+        
+        # Подключаем обработчик события изменения чекбокса
+        self.wav2lip_checkbox.stateChanged.connect(self.on_wav2lip_checkbox_changed)
+        
+        wav2lip_layout.addWidget(self.wav2lip_checkbox)
+        wav2lip_layout.addStretch()
+        wav2lip_layout.addWidget(self.resize_factor_label)
+        wav2lip_layout.addWidget(self.resize_factor_combo)
+        
+        main_frame_layout.addLayout(wav2lip_layout)
 
-        self.select_button = QPushButton(" Выбрать видео для дубляжа")
-        self.select_button.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
-        # self.select_button.setIconSize(QSize(20, 20))
+        self.select_button = QPushButton("Выбрать видео для дубляжа")
+        # Не используем стандартную иконку, используем Unicode символ
+        # self.select_button.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+        self.select_button.setText("\u0020\u2b07\u0020\u0020Выбрать видео для дубляжа") # Символ стрелки вниз с пробелами
         self.select_button.clicked.connect(self.select_file)
         main_frame_layout.addWidget(self.select_button)
 
@@ -1802,7 +1753,9 @@ class MainWindow(QMainWindow):
         self.time_label = QLabel("Время: --:--")
         self.time_label.setObjectName("timeLabel")
         self.cancel_button = QPushButton("Отмена")
-        self.cancel_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCancelButton))
+        # Не используем стандартную иконку, используем Unicode символ
+        # self.cancel_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCancelButton))
+        self.cancel_button.setText("\u0020\u2715\u0020\u0020Отмена") # Символ крестика с пробелами
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_processing)
         status_layout.addWidget(self.time_label)
@@ -1825,7 +1778,7 @@ class MainWindow(QMainWindow):
         self.processing = False
 
     def apply_theme(self):
-        """Применение выбранной темы и стилизация кастомных элементов"""
+        """Применение выбранной темы и стилизация кастомных элементов в стиле Windows 11"""
         theme_name = 'dark_blue.xml' if self.is_dark_theme else 'light_blue.xml'
         try:
             apply_stylesheet(self, theme=theme_name, invert_secondary=True)
@@ -1841,132 +1794,214 @@ class MainWindow(QMainWindow):
         text_secondary_color = colors['text_secondary']
         button_color = colors['button']
         button_hover_color = colors['button_hover']
+        button_pressed_color = colors['button_pressed']
         disabled_bg = colors['disabled_bg']
         disabled_fg = colors['disabled_fg']
         surface_color = colors['surface']
-        border_color = colors.get('border', 'rgba(255, 255, 255, 0.1)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.1)') # Цвет рамки
+        surface_hover_color = colors['surface_hover']
+        mica_color = colors['mica']
+        border_color = colors['border']
         progress_bg = colors['progress_bg']
         progress_chunk = colors['progress_chunk']
-
-        # Глобальный стиль для окна (фон)
-        self.setStyleSheet(f"QMainWindow {{ background-color: {colors['background']}; }}")
+        
+        # Windows 11 использует более закругленные углы и мягкие тени
+        border_radius = "12px"
+        
+        # Глобальный стиль окна
+        self.setStyleSheet(f"""
+            QMainWindow {{ 
+                background-color: {colors['background']}; 
+                font-family: 'Segoe UI', sans-serif;
+            }}
+            
+            QLabel {{ 
+                font-family: 'Segoe UI', sans-serif;
+                color: {text_color};
+            }}
+            
+            QComboBox, QCheckBox {{ 
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 10pt;
+            }}
+            
+            QPushButton {{ 
+                font-family: 'Segoe UI', sans-serif;
+                font-weight: 400;
+                font-size: 10pt;
+            }}
+        """)
 
         # Обновляем стили для кастомных элементов
         for frame in self.findChildren(StyledFrame):
              frame.setStyleSheet(f"""
                  QFrame {{
-                     background-color: {surface_color};
-                     border-radius: 8px;
+                     background-color: {mica_color};
+                     border-radius: {border_radius};
                      border: 1px solid {border_color};
                  }}
              """)
 
-        # Прогресс-бар
+        # Прогресс-бар в стиле Windows 11
         self.progress_bar.setStyleSheet(f"""
             QProgressBar {{
                 border: none;
                 border-radius: 8px;
                 text-align: center;
                 background-color: {progress_bg};
-                height: 18px; /* Чуть тоньше */
-                color: {text_color};
-                font-weight: bold;
+                height: 8px;
+                max-height: 8px;
+                color: transparent;
             }}
             QProgressBar::chunk {{
-                border-radius: 8px;
+                border-radius: 4px;
                 background-color: {progress_chunk};
             }}
         """)
 
-        # Стиль для ComboBox (выпадающий список языков)
-        combo_bg = colors.get('combo_bg', surface_color)
-        combo_hover_bg = colors.get('combo_hover', button_hover_color if not self.is_dark_theme else 'rgba(255, 255, 255, 0.15)')
-        combo_selection_bg = colors['primary']
-        combo_dropdown_bg = colors.get('dropdown_bg', '#2D2D2D' if self.is_dark_theme else '#FFFFFF')
-
-        self.target_language_combo.setStyleSheet(f"""
-            QComboBox {{
-                background-color: {combo_bg};
+        # Стиль для ComboBox (выпадающий список языков и resize_factor)
+        for combo in [self.target_language_combo, self.resize_factor_combo]:
+            combo.setStyleSheet(f"""
+                QComboBox {{
+                    background-color: {surface_color};
+                    color: {text_color};
+                    border: 1px solid {border_color};
+                    border-radius: {border_radius};
+                    padding: 6px 12px;
+                    min-width: 150px;
+                    font-size: 10pt;
+                }}
+                QComboBox:hover {{
+                    background-color: {surface_hover_color};
+                    border: 1px solid {colors['primary']};
+                }}
+                QComboBox::drop-down {{
+                    border: none;
+                    subcontrol-origin: padding;
+                    subcontrol-position: top right;
+                    width: 20px;
+                    padding-right: 10px;
+                }}
+                QComboBox::down-arrow {{
+                    color: {text_color};
+                }}
+                /* Явно указываем стиль для выпадающего списка */
+                QComboBox QAbstractItemView {{
+                    background-color: {surface_color};
+                    color: {text_color};
+                    selection-background-color: {colors['primary']};
+                    selection-color: white;
+                    border: 1px solid {border_color};
+                    border-radius: 8px;
+                    padding: 4px;
+                    outline: 0px;
+                }}
+                /* Дополнительный селектор для QListView, который фактически используется */
+                QComboBox QListView {{
+                    background-color: {surface_color};
+                    color: {text_color};
+                    border: 1px solid {border_color};
+                }}
+                QComboBox QAbstractItemView::item {{
+                    min-height: 30px;
+                    padding: 6px 10px;
+                    border-radius: 4px;
+                    color: {text_color}; /* Явно устанавливаем цвет текста элемента */
+                }}
+                QComboBox QAbstractItemView::item:selected {{
+                    background-color: {colors['primary']};
+                    color: white;
+                }}
+                QComboBox QAbstractItemView::item:hover {{
+                    background-color: {surface_hover_color};
+                    color: {text_color};
+                }}
+            """)
+        
+        # Глобальные стили для выпадающих списков
+        QApplication.instance().setStyleSheet(f"""
+            QComboBox QAbstractItemView {{
+                background-color: {surface_color};
                 color: {text_color};
-                border: 1px solid {border_color};
-                border-radius: 4px;
-                padding: 5px 8px;
-                min-width: 150px;
-                font-size: 14px;
+                selection-background-color: {colors['primary']};
+                selection-color: white;
             }}
-            QComboBox:hover {{
-                background-color: {combo_hover_bg};
-                border: 1px solid {colors['primary']}; /* Выделение при наведении */
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 20px;
-                padding-right: 5px;
-            }}
-            QComboBox::down-arrow {{
-                 /* Используем стандартную стрелку темы */
-                 /* image: url(:/qt-project.org/styles/commonstyle/images/downarraow-16.png); */
-                 /* Если стандартной нет, можно использовать символ ▼ */
-                 color: {text_color};
-            }}
-             QComboBox QAbstractItemView {{ /* Стиль выпадающего списка */
-                background-color: {combo_dropdown_bg};
-                color: {text_color};
-                selection-background-color: {combo_selection_bg};
-                selection-color: {'white' if self.is_dark_theme else 'white'};
-                border: 1px solid {border_color};
-                padding: 4px;
-                outline: 0px; /* Убираем рамку выделения */
-            }}
-            QComboBox QAbstractItemView::item {{
-                min-height: 25px;
-                padding: 3px 5px;
-                border-radius: 3px; /* Скругление элементов списка */
-            }}
-            QComboBox QAbstractItemView::item:selected {{
-                 /* Стиль выбранного элемента уже задан selection-background-color */
-            }}
-            QComboBox QAbstractItemView::item:hover {{
-                 background-color: {combo_hover_bg}; /* Подсветка при наведении */
-                 color: {text_color};
-            }}
-
         """)
 
-        # Общий стиль для кнопок
+        # Стиль для чекбокса в стиле Windows 11
+        self.wav2lip_checkbox.setStyleSheet(f"""
+            QCheckBox {{
+                spacing: 8px;
+                color: {text_color};
+                font-size: 10pt;
+            }}
+            QCheckBox::indicator {{
+                width: 20px;
+                height: 20px;
+                border-radius: 4px;
+                border: 1px solid {border_color};
+                background-color: {surface_color};
+            }}
+            QCheckBox::indicator:unchecked:hover {{
+                background-color: {surface_hover_color};
+                border: 1px solid {colors['primary']};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {colors['primary']};
+                border: 1px solid {colors['primary']};
+                image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>');
+            }}
+            QCheckBox::indicator:checked:hover {{
+                background-color: {button_hover_color};
+            }}
+            QCheckBox:disabled {{
+                color: {disabled_fg};
+            }}
+            QCheckBox::indicator:disabled {{
+                background-color: {disabled_bg};
+                border: 1px solid {disabled_bg};
+            }}
+        """)
+
+        # Общий стиль для кнопок в стиле Windows 11
         button_style = f"""
             QPushButton {{
                 background-color: {button_color};
-                color: white; /* Текст на кнопках всегда белый для контраста */
+                color: white;
                 border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-size: 14px;
-                font-weight: bold;
-                min-height: 28px; /* Минимальная высота */
+                border-radius: {border_radius};
+                padding: 10px 20px;
+                font-size: 10pt;
+                font-weight: 400;
+                min-height: 38px;
             }}
             QPushButton:hover {{
                 background-color: {button_hover_color};
             }}
-            QPushButton:pressed {{ /* Нажатое состояние */
-                 background-color: {colors['primary']}; /* Темнее основного */
+            QPushButton:pressed {{
+                background-color: {button_pressed_color};
             }}
             QPushButton:disabled {{
                 background-color: {disabled_bg};
                 color: {disabled_fg};
             }}
         """
+        
         self.select_button.setStyleSheet(button_style)
-        self.auth_button.setStyleSheet(button_style)
+        
+        # Кнопка отмены
         self.cancel_button.setStyleSheet(f"""
             {button_style}
-            QPushButton {{ background-color: {colors['error']}; }} /* Красный для отмены */
-            QPushButton:hover {{ background-color: {colors.get('error_hover', '#E53935')}; }}
+            QPushButton {{ 
+                background-color: {colors['error']};
+                padding: 8px 16px;
+                min-height: 34px;
+            }}
+            QPushButton:hover {{ 
+                background-color: {colors['error_hover']};
+            }}
         """)
 
-        # Стиль для кнопки темы (отдельно)
+        # Стиль для кнопки темы в стиле Windows 11
         theme_button_bg = 'rgba(255, 255, 255, 0.08)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.05)'
         theme_button_hover_bg = 'rgba(255, 255, 255, 0.12)' if self.is_dark_theme else 'rgba(0, 0, 0, 0.08)'
         self.theme_button.setStyleSheet(f"""
@@ -1974,28 +2009,29 @@ class MainWindow(QMainWindow):
                 background-color: {theme_button_bg};
                 color: {text_color};
                 border: 1px solid {border_color};
-                border-radius: 4px;
-                padding: 5px 10px;
-                font-weight: bold;
-                text-align: left; /* Иконка слева, текст справа */
-                font-size: 13px;
-                min-height: 28px;
+                border-radius: {border_radius};
+                padding: 8px 12px;
+                font-weight: 400;
+                text-align: center;
+                font-size: 10pt;
+                min-height: 34px;
             }}
             QPushButton:hover {{
                 background-color: {theme_button_hover_bg};
+                border: 1px solid {colors['primary']};
             }}
         """)
 
         # Стили текстовых меток
-        label_style = f"color: {text_color}; font-size: 14px;"
-        secondary_label_style = f"color: {text_secondary_color}; font-size: 13px;"
+        label_style = f"color: {text_color}; font-size: 10pt; font-weight: 400;"
+        secondary_label_style = f"color: {text_secondary_color}; font-size: 9pt; font-weight: 400;"
 
-        self.user_label.setStyleSheet(label_style + "font-weight: bold;")
         self.language_label.setStyleSheet(label_style)
+        self.resize_factor_label.setStyleSheet(label_style)
         self.file_label.setStyleSheet(secondary_label_style + "font-style: italic;")
         self.time_label.setStyleSheet(secondary_label_style)
         self.status_label.setStyleSheet(secondary_label_style + "font-style: italic;")
-        self.acceleration_label.setStyleSheet(f"color: {colors['primary']}; font-size: 14px; font-weight: bold;")
+        self.acceleration_label.setStyleSheet(f"color: {colors['primary']}; font-size: 10pt; font-weight: 500;")
 
 
     def show_with_animation(self):
@@ -2025,11 +2061,13 @@ class MainWindow(QMainWindow):
     def update_theme_button(self):
         """Обновление внешнего вида кнопки темы"""
         if self.is_dark_theme:
-            self.theme_button.setText(" Светлая тема")
-            self.theme_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogListView)) # Иконка светлой темы
+            # Не используем стандартную иконку, используем Unicode символ солнца
+            self.theme_button.setText("\u0020\u2600\u0020\u0020Светлая тема") # Символ солнца с пробелами
+            # self.theme_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogListView)) # Иконка светлой темы
         else:
-            self.theme_button.setText(" Тёмная тема")
-            self.theme_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView)) # Иконка темной темы
+            # Не используем стандартную иконку, используем Unicode символ луны
+            self.theme_button.setText("\u0020\u263D\u0020\u0020Тёмная тема") # Символ луны с пробелами
+            # self.theme_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView)) # Иконка темной темы
 
     def update_time_estimate(self):
         """Обновление оценки оставшегося времени"""
@@ -2071,9 +2109,8 @@ class MainWindow(QMainWindow):
 
     def reset_ui_state(self, processing_active=False):
         """Сброс состояния UI к начальному или рабочему"""
-        self.select_button.setEnabled(not processing_active and self.auth_manager.is_user_logged_in())
+        self.select_button.setEnabled(not processing_active)
         self.target_language_combo.setEnabled(not processing_active)
-        self.auth_button.setEnabled(not processing_active) # Блокируем вход/выход во время работы
         self.theme_button.setEnabled(not processing_active) # Блокируем смену темы
         self.cancel_button.setEnabled(processing_active)
 
@@ -2085,54 +2122,53 @@ class MainWindow(QMainWindow):
 
     def start_processing(self):
         if not self.video_path:
-            QMessageBox.warning(self, "Нет видео", "Пожалуйста, сначала выберите видеофайл.")
+            QMessageBox.warning(self, "Ошибка", "Пожалуйста, выберите видеофайл для обработки")
             return
 
-        selected_language_text = self.target_language_combo.currentText()
-        selected_language_code = self.language_codes[selected_language_text]
-        
-        # Получаем состояние чекбокса Wav2Lip
-        use_wav2lip = self.wav2lip_checkbox.isChecked() and WAV2LIP_AVAILABLE
-        
-        # Если выбран Wav2Lip, но он недоступен, предупреждаем пользователя
-        if self.wav2lip_checkbox.isChecked() and not WAV2LIP_AVAILABLE:
-            QMessageBox.warning(self, "Wav2Lip недоступен", 
-                               "Синхронизация губ с Wav2Lip была выбрана, но необходимые файлы не найдены. "
-                               "Процесс будет выполнен без синхронизации губ.")
-
-        # Проверяем, не идет ли уже обработка
         if self.processing:
-             logger.warning("Попытка запустить обработку, когда она уже идет.")
-             return
+            logger.warning("Обработка уже запущена")
+            return
 
-        logger.info(f"Запуск обработки для видео: {self.video_path}, язык: {selected_language_code} ({selected_language_text}), Wav2Lip: {use_wav2lip}")
-        self.status_label.setText("Подготовка к обработке...")
-        self.progress_bar.setValue(0) # Сброс прогресс-бара
-
-        try:
-             self.processor = VideoProcessor(self.video_path, 
-                                            target_language=selected_language_code,
-                                            use_wav2lip=use_wav2lip)
-             self.current_temp_dir = self.processor.working_dir # Сохраняем путь для очистки
-
-             # Подключаем сигналы
-             self.processor.progress.connect(self.progress_bar.setValue)
-             self.processor.status.connect(self.status_label.setText)
-             self.processor.finished.connect(self.processing_finished)
-             self.processor.error.connect(self.processing_error) # Подключаем сигнал ошибки
-             self.processor.acceleration_changed.connect(self.update_acceleration_label)
-
-             self.processing = True
-             self.start_time = QTime.currentTime() # Запускаем таймер QTime
-             self.timer.start(1000) # Таймер для обновления метки времени (раз в секунду)
-             self.reset_ui_state(processing_active=True) # Блокируем UI
-             self.processor.start() # Запускаем поток
-             logger.info("Поток обработки запущен.")
-
-        except Exception as e:
-             logger.exception("Ошибка при создании или запуске потока VideoProcessor:")
-             QMessageBox.critical(self, "Ошибка запуска", f"Не удалось начать обработку:\n{e}")
-             self.reset_ui_state(processing_active=False)
+        # Получаем выбранный язык
+        selected_language_name = self.target_language_combo.currentText()
+        target_language = self.language_codes.get(selected_language_name, "ru")
+        
+        # Получаем значение resize_factor, если включен Wav2Lip
+        resize_factor = 4  # По умолчанию
+        if self.wav2lip_checkbox.isChecked() and WAV2LIP_AVAILABLE:
+            resize_factor = int(self.resize_factor_combo.currentText())
+        
+        # Обновляем UI
+        self.status_label.setText("Инициализация...")
+        self.progress_bar.setValue(0)
+        self.select_button.setEnabled(False)
+        self.target_language_combo.setEnabled(False)
+        self.wav2lip_checkbox.setEnabled(False)
+        self.resize_factor_combo.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        
+        # Запускаем таймер
+        self.start_time = QTime.currentTime()
+        self.timer.start(1000)  # Обновление каждую секунду
+        self.processing = True
+        
+        # Создаем и запускаем рабочий поток
+        self.worker = VideoProcessor(
+            self.video_path, 
+            target_language, 
+            self.wav2lip_checkbox.isChecked(),
+            resize_factor
+        )
+        
+        # Подключаем сигналы
+        self.worker.status.connect(self.status_label.setText)
+        self.worker.progress.connect(self.progress_bar.setValue)
+        self.worker.finished.connect(self.processing_finished)
+        self.worker.error.connect(self.processing_error)
+        self.worker.acceleration_changed.connect(self.update_acceleration_label)
+        
+        # Запускаем поток
+        self.worker.start()
 
 
     def processing_finished(self, output_file_path):
@@ -2180,59 +2216,6 @@ class MainWindow(QMainWindow):
              logger.info("Нет временной папки для очистки.")
 
 
-    def check_auth(self):
-        """Проверка авторизации и обновление интерфейса"""
-        if self.auth_manager.is_user_logged_in():
-            user_info = self.auth_manager.get_current_user_info()
-            self.user_label.setText(f"Пользователь: {user_info.get('name', 'N/A')}")
-            self.auth_button.setText("Выйти")
-            self.auth_button.setIcon(self.style().standardIcon(QStyle.SP_DialogNoButton))
-            self.select_button.setEnabled(not self.processing) # Разрешаем выбор файла если не идет обработка
-        else:
-            self.user_label.setText("Пользователь: Гость")
-            self.auth_button.setText("Войти")
-            self.auth_button.setIcon(self.style().standardIcon(QStyle.SP_DialogYesButton))
-            self.select_button.setEnabled(False) # Запрещаем выбор файла без авторизации
-            self.file_label.setText("Войдите, чтобы выбрать файл")
-
-    def toggle_auth(self):
-        """Переключение между авторизацией и выходом"""
-        if self.processing: return # Нельзя во время обработки
-
-        if self.auth_manager.is_user_logged_in():
-            # Выход из системы
-            self.auth_manager.logout()
-            logger.info("Пользователь вышел из системы.")
-            self.check_auth()
-        else:
-            # Авторизация
-            login_dialog = LoginDialog(self.auth_manager, self)
-            if login_dialog.exec_():
-                logger.info("Пользователь успешно вошел в систему.")
-                self.check_auth()
-            else:
-                 logger.info("Диалог входа закрыт без авторизации.")
-
-
-    def select_file(self):
-        if self.processing: return # Нельзя во время обработки
-
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Выберите видеофайл для дубляжа",
-            "", # Начальная директория (пусто - последняя использованная)
-            "Видео файлы (*.mp4 *.avi *.mkv *.mov *.wmv);;Все файлы (*.*)" # Фильтры файлов
-        )
-        if file_path:
-            self.video_path = file_path
-            self.file_label.setText(os.path.basename(file_path))
-            logger.info(f"Выбран видеофайл: {file_path}")
-            # Автоматически запускаем обработку после выбора файла
-            self.start_processing()
-        else:
-             logger.info("Выбор файла отменен.")
-
-
     def update_acceleration_label(self, acceleration_type):
         """Обновление метки с информацией об ускорении"""
         self.acceleration_type = acceleration_type
@@ -2276,6 +2259,30 @@ class MainWindow(QMainWindow):
                       event.ignore() # Отменяем выход
              else:
                   event.accept() # Закрываем без вопросов
+
+    def select_file(self):
+        if self.processing: return # Нельзя во время обработки
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите видеофайл для дубляжа",
+            "", # Начальная директория (пусто - последняя использованная)
+            "Видео файлы (*.mp4 *.avi *.mkv *.mov *.wmv);;Все файлы (*.*)" # Фильтры файлов
+        )
+        if file_path:
+            self.video_path = file_path
+            self.file_label.setText(os.path.basename(file_path))
+            logger.info(f"Выбран видеофайл: {file_path}")
+            # Автоматически запускаем обработку после выбора файла
+            self.start_processing()
+        else:
+            logger.info("Выбор файла отменен.")
+
+    def on_wav2lip_checkbox_changed(self, state):
+        """Обработчик изменения состояния чекбокса Wav2Lip"""
+        enabled = (state == Qt.Checked and WAV2LIP_AVAILABLE)
+        self.resize_factor_label.setEnabled(enabled)
+        self.resize_factor_combo.setEnabled(enabled)
 
 
 # --- Точка входа ---

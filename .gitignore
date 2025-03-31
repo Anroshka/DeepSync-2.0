@@ -11,7 +11,8 @@ build/
 # Virtual environments
 venv/
 env/
-.env/
+ENV/
+.venv/
 
 # IDE specific files
 .idea/
@@ -70,4 +71,30 @@ cache/
 
 # ОС-специфичные файлы
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Кэш-директории DeepSync
+temp_processing/
+whisper_models_cache/
+
+# Кеш и модели Wav2Lip (исключаем большие файлы моделей)
+Wav2Lip/checkpoints/wav2lip.pth
+Wav2Lip/checkpoints/wav2lip_gan.pth
+Wav2Lip/checkpoints/*.pt
+
+# Файлы конфигурации IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Выходные медиа файлы (обычно не добавляются в репозиторий)
+# Раскомментируйте, если уверены, что не храните нужные медиа-файлы в Git
+# *.mp4
+# *.wav
+# *.mp3
+# *.avi
+# *.mov
+
+# Локальные переменные окружения
+.env 
