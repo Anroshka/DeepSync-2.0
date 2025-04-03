@@ -6,7 +6,7 @@ import subprocess # <--- Добавлен для запуска Wav2Lip
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QPushButton, QLabel, QFileDialog, QProgressBar, QMessageBox,
                            QStyle, QStyleFactory, QHBoxLayout, QFrame, QGraphicsOpacityEffect,
-                           QComboBox, QCheckBox)
+                           QComboBox, QCheckBox, QSlider)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPropertyAnimation, QEasingCurve, QTime
 from PyQt5.QtGui import QPalette, QColor, QIcon
 from qt_material import apply_stylesheet, list_themes
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # --- Настройки Wav2Lip ---
 WAV2LIP_PYTHON_PATH = "python"  # Путь к Python с установленным Wav2Lip
 WAV2LIP_INFERENCE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Wav2Lip", "inference.py")
-WAV2LIP_CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Wav2Lip", "checkpoints", "wav2lip.pth")
+WAV2LIP_CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Wav2Lip", "checkpoints", "wav2lip_gan.pth")
 
 # Проверка доступности Wav2Lip
 WAV2LIP_AVAILABLE = os.path.exists(WAV2LIP_INFERENCE_SCRIPT) and os.path.exists(WAV2LIP_CHECKPOINT)
@@ -73,6 +73,9 @@ class VideoProcessor(QThread):
         self.target_language = target_language
         self.use_wav2lip = use_wav2lip and WAV2LIP_AVAILABLE  # Используем Wav2Lip только если он доступен
         self.resize_factor = resize_factor  # Фактор масштабирования для Wav2Lip
+        # Параметры громкости для микширования
+        self.speech_gain = 0.8  # Громкость речи (0.0 - 1.0)
+        self.background_gain = 0.2  # Громкость фона (0.0 - 1.0)
         # Создаем уникальное имя папки на случай параллельной обработки
         base_working_dir = "temp_processing"
         # Можно добавить timestamp или uuid для уникальности, если нужно
@@ -940,21 +943,8 @@ class VideoProcessor(QThread):
             speech = librosa.util.fix_length(speech, size=max_len)
             background = librosa.util.fix_length(background, size=max_len)
 
-            # Нормализация громкости (простая пиковая)
-            max_abs_speech = np.max(np.abs(speech))
-            max_abs_background = np.max(np.abs(background))
-
-            if max_abs_speech > 0: speech_norm = speech / max_abs_speech
-            else: speech_norm = speech
-
-            if max_abs_background > 0: background_norm = background / max_abs_background
-            else: background_norm = background
-
-            # Коэффициенты громкости (речь громче фона)
-            speech_gain = 0.8 # 80% громкости
-            background_gain = 0.2 # 20% громкости
-
-            mixed = speech_norm * speech_gain + background_norm * background_gain
+            # Используем предустановленные значения громкости без нормализации
+            mixed = speech * self.speech_gain + background * self.background_gain
 
             # Предотвращение клиппинга
             max_val = np.max(np.abs(mixed))
@@ -963,7 +953,6 @@ class VideoProcessor(QThread):
                 logger.warning("Обнаружен клиппинг при микшировании, применена нормализация.")
             elif max_val == 0:
                  logger.warning("Результат микширования - тишина.")
-
 
             sf.write(output_path, mixed, target_sr, subtype='PCM_16')
             logger.info(f"Финальное смикшированное аудио сохранено: {output_path}")
@@ -1087,7 +1076,7 @@ class VideoProcessor(QThread):
             # Дополнительные параметры при необходимости
             "--pads", "0", "0", "0", "0",  # Отступы [top, bottom, left, right]
             "--face_det_batch_size", "16",
-            "--wav2lip_batch_size", "128",
+            "--wav2lip_batch_size", "64",
             "--resize_factor", str(self.resize_factor),  # Используем значение из параметра класса
         ]
         
@@ -1739,6 +1728,46 @@ class MainWindow(QMainWindow):
         self.file_label.setObjectName("fileLabel")
         main_frame_layout.addWidget(self.file_label)
 
+        # --- Слайдеры регулировки громкости ---
+        volume_layout = QHBoxLayout()
+        
+        # Слайдер громкости речи
+        speech_volume_layout = QVBoxLayout()
+        speech_volume_label = QLabel("Громкость речи:")
+        speech_volume_label.setObjectName("volumeLabel")
+        self.speech_volume_slider = QSlider(Qt.Horizontal)
+        self.speech_volume_slider.setMinimum(0)
+        self.speech_volume_slider.setMaximum(100)
+        self.speech_volume_slider.setValue(80)  # По умолчанию 80%
+        self.speech_volume_slider.setToolTip("Регулировка громкости речи")
+        self.speech_volume_value = QLabel("80%")
+        self.speech_volume_value.setAlignment(Qt.AlignCenter)
+        self.speech_volume_slider.valueChanged.connect(self.on_speech_volume_changed)
+        speech_volume_layout.addWidget(speech_volume_label)
+        speech_volume_layout.addWidget(self.speech_volume_slider)
+        speech_volume_layout.addWidget(self.speech_volume_value)
+        
+        # Слайдер громкости фона
+        background_volume_layout = QVBoxLayout()
+        background_volume_label = QLabel("Громкость фона:")
+        background_volume_label.setObjectName("volumeLabel")
+        self.background_volume_slider = QSlider(Qt.Horizontal)
+        self.background_volume_slider.setMinimum(0)
+        self.background_volume_slider.setMaximum(100)
+        self.background_volume_slider.setValue(20)  # По умолчанию 20%
+        self.background_volume_slider.setToolTip("Регулировка громкости фонового шума")
+        self.background_volume_value = QLabel("20%")
+        self.background_volume_value.setAlignment(Qt.AlignCenter)
+        self.background_volume_slider.valueChanged.connect(self.on_background_volume_changed)
+        background_volume_layout.addWidget(background_volume_label)
+        background_volume_layout.addWidget(self.background_volume_slider)
+        background_volume_layout.addWidget(self.background_volume_value)
+        
+        volume_layout.addLayout(speech_volume_layout)
+        volume_layout.addLayout(background_volume_layout)
+        
+        main_frame_layout.addLayout(volume_layout)
+
         main_layout.addWidget(main_frame)
 
         # --- Панель прогресса и статуса ---
@@ -2099,44 +2128,63 @@ class MainWindow(QMainWindow):
 
 
     def cancel_processing(self):
-        """Запрос на отмену обработки видео"""
-        if self.processor is not None and self.processing:
-            logger.info("Нажата кнопка отмены.")
+        """Отмена текущей обработки"""
+        if hasattr(self, 'processor') and self.processor and self.processor.isRunning():
+            logger.info("Отмена обработки запрошена пользователем")
             self.status_label.setText("Отмена обработки...")
-            self.cancel_button.setEnabled(False) # Блокируем повторное нажатие
             self.processor.request_cancellation()
-            # Не сбрасываем состояние здесь, ждем сигнала error или finished от потока
+            self.cancel_button.setEnabled(False)
+            
+            # Поток должен обработать запрос на отмену и завершиться
+            # Любая очистка будет выполнена в обработчике finished
 
     def reset_ui_state(self, processing_active=False):
-        """Сброс состояния UI к начальному или рабочему"""
+        """Сброс состояния UI в зависимости от режима (обработка активна/неактивна)"""
         self.select_button.setEnabled(not processing_active)
         self.target_language_combo.setEnabled(not processing_active)
         self.theme_button.setEnabled(not processing_active) # Блокируем смену темы
+        self.wav2lip_checkbox.setEnabled(not processing_active and WAV2LIP_AVAILABLE)
+        self.resize_factor_label.setEnabled(not processing_active and self.wav2lip_checkbox.isChecked() and WAV2LIP_AVAILABLE)
+        self.resize_factor_combo.setEnabled(not processing_active and self.wav2lip_checkbox.isChecked() and WAV2LIP_AVAILABLE)
+        self.speech_volume_slider.setEnabled(not processing_active)
+        self.background_volume_slider.setEnabled(not processing_active)
         self.cancel_button.setEnabled(processing_active)
-
+        
         if not processing_active:
             self.progress_bar.setValue(0)
+            if self.timer.isActive():
+                self.timer.stop()
             self.time_label.setText("Время: --:--")
-            self.timer.stop()
             self.processing = False
 
     def start_processing(self):
-        if not self.video_path:
-            QMessageBox.warning(self, "Ошибка", "Пожалуйста, выберите видеофайл для обработки")
-            return
-
-        if self.processing:
-            logger.warning("Обработка уже запущена")
+        if not self.video_path or not os.path.exists(self.video_path):
+            self.status_label.setText("Ошибка: видеофайл не выбран или не существует")
             return
 
         # Получаем выбранный язык
-        selected_language_name = self.target_language_combo.currentText()
-        target_language = self.language_codes.get(selected_language_name, "ru")
+        target_language = self.language_codes[self.target_language_combo.currentText()]
+        logger.info(f"Выбран язык перевода: {target_language}")
         
-        # Получаем значение resize_factor, если включен Wav2Lip
-        resize_factor = 4  # По умолчанию
-        if self.wav2lip_checkbox.isChecked() and WAV2LIP_AVAILABLE:
-            resize_factor = int(self.resize_factor_combo.currentText())
+        # Получаем состояние Wav2Lip
+        use_wav2lip = self.wav2lip_checkbox.isChecked() and WAV2LIP_AVAILABLE
+        resize_factor = int(self.resize_factor_combo.currentText())
+        
+        # Получаем значения громкости
+        speech_gain = self.speech_volume_slider.value() / 100.0
+        background_gain = self.background_volume_slider.value() / 100.0
+
+        # Создаем и настраиваем видеопроцессор
+        self.processor = VideoProcessor(
+            self.video_path, 
+            target_language=target_language,
+            use_wav2lip=use_wav2lip,
+            resize_factor=resize_factor
+        )
+        
+        # Устанавливаем параметры громкости
+        self.processor.speech_gain = speech_gain
+        self.processor.background_gain = background_gain
         
         # Обновляем UI
         self.status_label.setText("Инициализация...")
@@ -2152,23 +2200,15 @@ class MainWindow(QMainWindow):
         self.timer.start(1000)  # Обновление каждую секунду
         self.processing = True
         
-        # Создаем и запускаем рабочий поток
-        self.worker = VideoProcessor(
-            self.video_path, 
-            target_language, 
-            self.wav2lip_checkbox.isChecked(),
-            resize_factor
-        )
-        
         # Подключаем сигналы
-        self.worker.status.connect(self.status_label.setText)
-        self.worker.progress.connect(self.progress_bar.setValue)
-        self.worker.finished.connect(self.processing_finished)
-        self.worker.error.connect(self.processing_error)
-        self.worker.acceleration_changed.connect(self.update_acceleration_label)
+        self.processor.status.connect(self.status_label.setText)
+        self.processor.progress.connect(self.progress_bar.setValue)
+        self.processor.finished.connect(self.processing_finished)
+        self.processor.error.connect(self.processing_error)
+        self.processor.acceleration_changed.connect(self.update_acceleration_label)
         
         # Запускаем поток
-        self.worker.start()
+        self.processor.start()
 
 
     def processing_finished(self, output_file_path):
@@ -2283,6 +2323,18 @@ class MainWindow(QMainWindow):
         enabled = (state == Qt.Checked and WAV2LIP_AVAILABLE)
         self.resize_factor_label.setEnabled(enabled)
         self.resize_factor_combo.setEnabled(enabled)
+
+    def on_speech_volume_changed(self, value):
+        """Обработчик изменения громкости речи"""
+        self.speech_volume_value.setText(f"{value}%")
+        if hasattr(self, 'processor') and self.processor is not None:
+            self.processor.speech_gain = value / 100.0
+    
+    def on_background_volume_changed(self, value):
+        """Обработчик изменения громкости фона"""
+        self.background_volume_value.setText(f"{value}%")
+        if hasattr(self, 'processor') and self.processor is not None:
+            self.processor.background_gain = value / 100.0
 
 
 # --- Точка входа ---
